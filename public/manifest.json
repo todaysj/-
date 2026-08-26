@@ -1,0 +1,10 @@
+{
+  "name": "여행플래너",
+  "short_name": "여행플래너",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#1b4b7a",
+  "theme_color": "#1b4b7a",
+  "lang": "ko"
+}

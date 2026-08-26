@@ -1,0 +1,11 @@
+{
+  "entities": {
+    "trips": {
+      "title": "Trip Plans",
+      "description": "Shared travel itineraries, budgets, reservations, and checklists",
+      "type": "collection",
+      "params": {},
+      "examples": []
+    }
+  }
+}
