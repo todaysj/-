@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Trip, SouvenirItem, SouvenirTabConfig } from '../types';
-import { compressImage } from '../utils/imageUtils';
+import { compressImage, resolveTripPhotos } from '../utils/imageUtils';
 import {
   Gift,
   Plus,
@@ -35,6 +35,7 @@ import {
   Palette
 } from 'lucide-react';
 import { getTripSouvenirTabs, DEFAULT_SOUVENIR_TAGS, TAG_COLOR_PALETTE, DEFAULT_TAG_COLORS, getTagColorInfo } from '../utils/tabUtils';
+import { getPhotoLocal } from '../utils/photoStore';
 import {
   getTripBackups,
   autoRecoverTabSouvenirs,
@@ -42,6 +43,67 @@ import {
   getSouvenirItemsForTab,
   TripBackup
 } from '../utils/tripIndexedDB';
+
+const AsyncSouvenirImg: React.FC<{
+  src: string;
+  alt?: string;
+  className?: string;
+}> = ({ src, alt, className }) => {
+  const [resolvedSrc, setResolvedSrc] = useState<string>(() => {
+    if (src && !src.startsWith('photo://')) return src;
+    return '';
+  });
+  const [isResolving, setIsResolving] = useState<boolean>(() => Boolean(src && src.startsWith('photo://')));
+
+  useEffect(() => {
+    let isMounted = true;
+    if (!src) {
+      setResolvedSrc('');
+      setIsResolving(false);
+      return;
+    }
+    if (src.startsWith('photo://')) {
+      setIsResolving(true);
+      getPhotoLocal(src).then((dataUrl) => {
+        if (isMounted) {
+          if (dataUrl) {
+            setResolvedSrc(dataUrl);
+          }
+          setIsResolving(false);
+        }
+      }).catch(() => {
+        if (isMounted) setIsResolving(false);
+      });
+    } else {
+      setResolvedSrc(src);
+      setIsResolving(false);
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [src]);
+
+  if (isResolving || (!resolvedSrc && src)) {
+    return (
+      <div className={`flex items-center justify-center bg-slate-100 ${className || ''}`}>
+        <div className="w-5 h-5 border-2 border-slate-300 border-t-amber-500 rounded-full animate-spin" />
+      </div>
+    );
+  }
+
+  if (!resolvedSrc) {
+    return <div className={`bg-slate-100 ${className || ''}`} />;
+  }
+
+  return (
+    <img
+      src={resolvedSrc}
+      alt={alt || ''}
+      referrerPolicy="no-referrer"
+      className={className}
+    />
+  );
+};
 
 interface SouvenirViewProps {
   trip: Trip;
@@ -119,17 +181,25 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
 
-  // Auto-scan on mount or tab change to restore any missing souvenirs for current tab
+  // Auto-resolve any photo:// references into full HD images
   useEffect(() => {
     let isMounted = true;
-    autoRecoverTabSouvenirs(trip, currentTab.id, currentTab.title).then(({ trip: recoveredTrip, recoveredCount }) => {
-      if (!isMounted) return;
-      if (recoveredCount > 0) {
-        onUpdateTrip(recoveredTrip);
-        setRecoveryBanner(`${recoveredCount}개의 항목이 복구되었습니다.`);
-        setTimeout(() => setRecoveryBanner(null), 5000);
-      }
-    });
+    const hasPhotoUris = trip.souvenirTabs?.some((tab) =>
+      tab.items?.some(
+        (item) =>
+          item.images?.some((img) => typeof img === 'string' && img.startsWith('photo://')) ||
+          (typeof item.imageUrl === 'string' && item.imageUrl.startsWith('photo://'))
+      )
+    );
+
+    if (hasPhotoUris) {
+      resolveTripPhotos(trip).then((resolved) => {
+        if (isMounted && resolved) {
+          onUpdateTrip(resolved);
+        }
+      });
+    }
+
     return () => {
       isMounted = false;
     };
@@ -231,7 +301,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
     const validImages = itemImages.filter(
       (img) =>
         typeof img === 'string' &&
-        (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:'))
+        (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:') || img.startsWith('photo://'))
     );
     setImages(validImages);
     setDirectUrlInput('');
@@ -933,7 +1003,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
             const itemImages = rawImages.filter(
               (img) =>
                 typeof img === 'string' &&
-                (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:'))
+                (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:') || img.startsWith('photo://'))
             );
 
             return (
@@ -952,10 +1022,9 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                       {itemImages.length === 1 ? (
                         /* Single Photo View */
                         <div className="relative h-44 w-full group/img overflow-hidden">
-                          <img
+                          <AsyncSouvenirImg
                             src={itemImages[0]}
                             alt={item.title}
-                            referrerPolicy="no-referrer"
                             className={`w-full h-full object-cover transition duration-300 group-hover/img:scale-105 ${
                               item.isPurchased ? 'grayscale-[30%] opacity-90' : ''
                             }`}
@@ -974,10 +1043,9 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                         <div className="relative h-44 w-full grid grid-cols-2 gap-0.5 bg-slate-200 overflow-hidden">
                           {itemImages.slice(0, 2).map((imgUrl, imgIdx) => (
                             <div key={imgIdx} className="relative h-full w-full group/img overflow-hidden bg-slate-100">
-                              <img
+                              <AsyncSouvenirImg
                                 src={imgUrl}
                                 alt={`${item.title} - ${imgIdx + 1}`}
-                                referrerPolicy="no-referrer"
                                 className={`w-full h-full object-cover transition duration-300 group-hover/img:scale-105 ${
                                   item.isPurchased ? 'grayscale-[30%] opacity-90' : ''
                                 }`}
@@ -1290,10 +1358,9 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                         key={idx}
                         className="relative h-28 rounded-xl bg-slate-100 border border-slate-200 overflow-hidden group shadow-2xs"
                       >
-                        <img
+                        <AsyncSouvenirImg
                           src={imgUrl}
                           alt={`사진 ${idx + 1}`}
-                          referrerPolicy="no-referrer"
                           className="w-full h-full object-cover"
                         />
                         <div className="absolute top-1.5 left-1.5 px-1.5 py-0.5 bg-black/60 text-white rounded text-[10px] font-bold">
@@ -1747,10 +1814,9 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
           >
             {/* Main Lightbox Image */}
             <div className="relative overflow-hidden rounded-2xl max-h-[80vh] flex items-center justify-center bg-black/40">
-              <img
+              <AsyncSouvenirImg
                 src={lightboxImages[lightboxIndex]}
                 alt={`확대 사진 ${lightboxIndex + 1}`}
-                referrerPolicy="no-referrer"
                 className="w-auto h-auto max-h-[75vh] max-w-[90vw] object-contain rounded-2xl"
               />
 
@@ -1795,7 +1861,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                       idx === lightboxIndex ? 'border-pink-500 scale-105' : 'border-transparent opacity-60 hover:opacity-100'
                     }`}
                   >
-                    <img src={img} alt="썸네일" className="w-full h-full object-cover" />
+                    <AsyncSouvenirImg src={img} alt="썸네일" className="w-full h-full object-cover" />
                   </button>
                 ))}
                 <span className="text-white text-xs font-bold px-2">

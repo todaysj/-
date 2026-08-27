@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Trip, ScheduleItem, CategoryType } from '../types';
 import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy } from 'lucide-react';
+import { AsyncImage } from './AsyncImage';
 
 interface ItineraryViewProps {
   trip: Trip;
@@ -100,7 +101,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     <div className="space-y-6">
       {/* Trip Header Banner */}
       <div className="relative rounded-2xl overflow-hidden shadow-xl bg-slate-900 text-white">
-        <img
+        <AsyncImage
           src={trip.coverImage}
           alt={trip.title}
           className="w-full h-44 sm:h-56 object-cover opacity-40"

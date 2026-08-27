@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Trip, TabType } from '../types';
-import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock } from 'lucide-react';
+import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2 } from 'lucide-react';
 import { getTripChecklistTabs, getTripSouvenirTabs } from '../utils/tabUtils';
 
 interface NavbarProps {
@@ -372,7 +372,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               {onDuplicateTrip && (
                 <button
                   onClick={onDuplicateTrip}
-                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition shadow-sm whitespace-nowrap shrink-0"
+                  className="hidden sm:inline-flex items-center space-x-1 px-2.5 sm:px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold rounded-xl transition border border-slate-700 whitespace-nowrap shrink-0"
                   title="현재 여행 일정을 복사하여 새 여행 생성"
                 >
                   <Copy className="w-3.5 h-3.5" />
@@ -420,6 +420,38 @@ export const Navbar: React.FC<NavbarProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Multi-Trip Quick Selector Bar (When 2 or more trips exist) */}
+        {trips.length > 1 && (
+          <div className="flex items-center space-x-2 py-2 overflow-x-auto scrollbar-none border-b border-slate-800/80 -mx-3 px-3 sm:mx-0 sm:px-0">
+            <span className="text-[11px] text-slate-400 font-bold shrink-0 flex items-center gap-1.5">
+              <span className="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+              여행 선택:
+            </span>
+            {trips.map((trip) => {
+              const isSelected = trip.id === activeTrip.id;
+              const schedCount = trip.schedule?.length || 0;
+              return (
+                <button
+                  key={`quick-trip-${trip.id}`}
+                  onClick={() => onSelectTrip(trip.id)}
+                  className={`inline-flex items-center space-x-1.5 px-3 py-1 rounded-xl text-xs font-bold transition shrink-0 whitespace-nowrap cursor-pointer ${
+                    isSelected
+                      ? 'bg-sky-600 text-white shadow-md ring-1 ring-sky-400/80'
+                      : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/60'
+                  }`}
+                >
+                  <span>✈️ {trip.title}</span>
+                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                    isSelected ? 'bg-sky-900/80 text-sky-100' : 'bg-slate-900/80 text-slate-300'
+                  }`}>
+                    일정 {schedCount}개
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         {/* Tab Navigation Menu (Touch & Scroll-friendly for mobile, customizable order) */}
         <nav className="flex space-x-1.5 sm:space-x-2 overflow-x-auto py-2 scrollbar-none touch-pan-x -mx-3 px-3 sm:mx-0 sm:px-0">

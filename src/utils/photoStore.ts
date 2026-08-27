@@ -6,7 +6,7 @@ const DB_VERSION = 1;
 const STORE_NAME = 'photos';
 const PHOTOS_COLLECTION = 'photos';
 
-// In-memory fallback / quick cache
+// In-memory fallback / instant cache
 const memoryCache = new Map<string, string>();
 
 let idbPromise: Promise<IDBDatabase | null> | null = null;
@@ -28,9 +28,7 @@ function getIDB(): Promise<IDBDatabase | null> {
         }
       };
       request.onsuccess = () => resolve(request.result);
-      request.onerror = () => {
-        resolve(null);
-      };
+      request.onerror = () => resolve(null);
     } catch {
       resolve(null);
     }
@@ -40,7 +38,7 @@ function getIDB(): Promise<IDBDatabase | null> {
 }
 
 /**
- * Save a photo dataUrl locally (IndexedDB + memory) and sync to Firestore
+ * Save a photo dataUrl locally (IndexedDB + memory) and sync directly to Firestore `/photos/{photoId}`
  */
 export async function savePhotoLocal(photoId: string, dataUrl: string): Promise<void> {
   if (!photoId || !dataUrl) return;
@@ -62,32 +60,42 @@ export async function savePhotoLocal(photoId: string, dataUrl: string): Promise<
     // Non-critical local save fallback
   }
 
-  // 2. Asynchronously sync to Firestore collection so it is accessible on Netlify / mobile
+  // 2. Direct sync to Firestore collection so all devices, friends' phones, and Netlify load it
   try {
-    if (dataUrl.startsWith('data:image/') && dataUrl.length < 800000) {
-      setDoc(doc(db, PHOTOS_COLLECTION, photoId), {
-        dataUrl,
-        updatedAt: Date.now()
-      }, { merge: true }).catch(() => {});
+    if (dataUrl.startsWith('data:image/') && dataUrl.length < 950000) {
+      await setDoc(
+        doc(db, PHOTOS_COLLECTION, photoId),
+        {
+          dataUrl,
+          updatedAt: Date.now()
+        },
+        { merge: true }
+      );
     }
-  } catch {}
+  } catch (err) {
+    console.warn('Photo cloud upload notice:', err);
+  }
 }
 
 /**
  * Retrieve a photo dataUrl:
- * 1. Memory Cache
- * 2. Local IndexedDB
- * 3. Firestore `photos` collection (for Netlify, other devices, or new browsers)
+ * 1. Memory Cache (instant)
+ * 2. Local IndexedDB (fast)
+ * 3. Firestore `photos` collection (cross-device cloud sync)
  */
-export async function getPhotoLocal(photoId: string): Promise<string | null> {
-  if (!photoId) return null;
+export async function getPhotoLocal(rawPhotoId: string): Promise<string | null> {
+  if (!rawPhotoId) return null;
+  const photoId = rawPhotoId.startsWith('photo://') ? rawPhotoId.replace('photo://', '') : rawPhotoId;
 
   // 1. Check memory cache
   if (memoryCache.has(photoId)) {
     return memoryCache.get(photoId) || null;
   }
+  if (memoryCache.has(`photo://${photoId}`)) {
+    return memoryCache.get(`photo://${photoId}`) || null;
+  }
 
-  // 2. Check local IndexedDB
+  // 2. Check local IndexedDB (JPlanner_Media_DB)
   try {
     const idb = await getIDB();
     if (idb) {
@@ -97,11 +105,7 @@ export async function getPhotoLocal(photoId: string): Promise<string | null> {
         const req = store.get(photoId);
         req.onsuccess = () => {
           const val = req.result as string | undefined;
-          if (val) {
-            resolve(val);
-          } else {
-            resolve(null);
-          }
+          resolve(val || null);
         };
         req.onerror = () => resolve(null);
       });
@@ -113,7 +117,7 @@ export async function getPhotoLocal(photoId: string): Promise<string | null> {
     }
   } catch {}
 
-  // 3. Check Firestore `photos` collection if missing locally (e.g. on Netlify deploy)
+  // 3. Check Firestore `photos` collection (cross-device cloud sync)
   try {
     const docSnap = await getDoc(doc(db, PHOTOS_COLLECTION, photoId));
     if (docSnap.exists()) {
@@ -132,7 +136,60 @@ export async function getPhotoLocal(photoId: string): Promise<string | null> {
         return cloudDataUrl;
       }
     }
-  } catch {}
+  } catch (err) {
+    console.warn('Photo cloud fetch notice:', err);
+  }
+
+  // 4. Search local backups in `JPlanner_Trips_DB` (trips_backups) to recover any original uploaded photos
+  try {
+    if (typeof window !== 'undefined' && window.indexedDB) {
+      const tripsIDB = await new Promise<IDBDatabase | null>((resolve) => {
+        const req = window.indexedDB.open('JPlanner_Trips_DB', 1);
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      });
+
+      if (tripsIDB && tripsIDB.objectStoreNames.contains('trips_backups')) {
+        const backups = await new Promise<any[]>((resolve) => {
+          const tx = tripsIDB.transaction('trips_backups', 'readonly');
+          const store = tx.objectStore('trips_backups');
+          const req = store.getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+
+        // Search through backups for matching photo base64
+        for (const b of backups) {
+          const t = b?.trip;
+          if (!t) continue;
+          if (t.souvenirTabs && Array.isArray(t.souvenirTabs)) {
+            for (const tab of t.souvenirTabs) {
+              if (tab.items && Array.isArray(tab.items)) {
+                for (const item of tab.items) {
+                  if (photoId.includes(item.id)) {
+                    if (item.images && Array.isArray(item.images)) {
+                      for (const img of item.images) {
+                        if (typeof img === 'string' && img.startsWith('data:image/')) {
+                          savePhotoLocal(photoId, img).catch(() => {});
+                          return img;
+                        }
+                      }
+                    }
+                    if (typeof item.imageUrl === 'string' && item.imageUrl.startsWith('data:image/')) {
+                      savePhotoLocal(photoId, item.imageUrl).catch(() => {});
+                      return item.imageUrl;
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Backup photo recovery notice:', err);
+  }
 
   return null;
 }

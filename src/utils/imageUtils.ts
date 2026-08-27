@@ -96,8 +96,9 @@ export async function compressImage(
 
 /**
  * Optimizes Trip payload for Firestore.
- * Keeps full base64 dataUrls directly in the Trip object so that Netlify,
- * mobile web, and any other domain render images instantly without missing local dependencies.
+ * Saves large base64 photos to Firestore `photos/{photoId}` collection and local IndexedDB,
+ * storing lightweight `photo://${photoId}` references in the Trip document.
+ * This guarantees the Trip document never exceeds Firestore's 1MB limit and syncs seamlessly across all devices.
  */
 export async function detachTripPhotos(trip: Trip): Promise<Trip> {
   const cloned: Trip = JSON.parse(JSON.stringify(trip));
@@ -110,7 +111,7 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     delete (cloned as any).packingList;
   }
 
-  // 2. Process souvenir items: resolve any photo:// references if possible, and ensure valid images array
+  // 2. Process souvenir items: detach base64 photos to photo:// links & save to Firestore photos collection
   if (cloned.souvenirTabs && Array.isArray(cloned.souvenirTabs)) {
     for (const tab of cloned.souvenirTabs) {
       if (tab.items && Array.isArray(tab.items)) {
@@ -118,44 +119,38 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
           if (item.images && Array.isArray(item.images)) {
             const processedImages: string[] = [];
             for (let idx = 0; idx < item.images.length; idx++) {
-              let img = item.images[idx];
-              if (typeof img === 'string' && img.startsWith('photo://')) {
-                const photoId = img.replace('photo://', '');
-                const resolved = await getPhotoLocal(photoId);
-                if (resolved) {
-                  img = resolved;
-                }
-              }
-              if (typeof img === 'string' && (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:'))) {
-                processedImages.push(img);
-                // Also cache locally
+              const img = item.images[idx];
+              if (typeof img === 'string') {
                 if (img.startsWith('data:image/')) {
                   const photoId = generatePhotoId(`${trip.id}_${item.id}_${idx}`);
-                  savePhotoLocal(photoId, img).catch(() => {});
+                  await savePhotoLocal(photoId, img);
+                  processedImages.push(`photo://${photoId}`);
+                } else if (img.startsWith('photo://') || img.startsWith('http://') || img.startsWith('https://')) {
+                  processedImages.push(img);
                 }
               }
             }
             item.images = processedImages;
-            item.imageUrl = processedImages.length > 0 ? processedImages[0] : undefined;
-          } else if (item.imageUrl) {
-            let img = item.imageUrl;
-            if (typeof img === 'string' && img.startsWith('photo://')) {
-              const photoId = img.replace('photo://', '');
-              const resolved = await getPhotoLocal(photoId);
-              if (resolved) {
-                img = resolved;
-              }
-            }
-            if (typeof img === 'string' && (img.startsWith('data:image/') || img.startsWith('http://') || img.startsWith('https://') || img.startsWith('blob:'))) {
-              item.imageUrl = img;
-              item.images = [img];
-              if (img.startsWith('data:image/')) {
-                const photoId = generatePhotoId(`${trip.id}_${item.id}_0`);
-                savePhotoLocal(photoId, img).catch(() => {});
-              }
+            if (processedImages.length > 0) {
+              item.imageUrl = processedImages[0];
             } else {
               delete item.imageUrl;
-              item.images = [];
+            }
+          } else if (item.imageUrl) {
+            const img = item.imageUrl;
+            if (typeof img === 'string') {
+              if (img.startsWith('data:image/')) {
+                const photoId = generatePhotoId(`${trip.id}_${item.id}_0`);
+                await savePhotoLocal(photoId, img);
+                item.imageUrl = `photo://${photoId}`;
+                item.images = [`photo://${photoId}`];
+              } else if (img.startsWith('photo://') || img.startsWith('http://') || img.startsWith('https://')) {
+                item.imageUrl = img;
+                item.images = [img];
+              } else {
+                delete item.imageUrl;
+                item.images = [];
+              }
             }
           }
         }
@@ -164,13 +159,11 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
   }
 
   // 3. Process cover image
-  if (cloned.coverImage) {
-    if (cloned.coverImage.startsWith('photo://')) {
-      const photoId = cloned.coverImage.replace('photo://', '');
-      const resolved = await getPhotoLocal(photoId);
-      if (resolved) {
-        cloned.coverImage = resolved;
-      }
+  if (cloned.coverImage && typeof cloned.coverImage === 'string') {
+    if (cloned.coverImage.startsWith('data:image/')) {
+      const photoId = generatePhotoId(`${trip.id}_cover`);
+      await savePhotoLocal(photoId, cloned.coverImage);
+      cloned.coverImage = `photo://${photoId}`;
     }
   }
 
@@ -179,7 +172,7 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
 
 /**
  * Resolves `photo://${photoId}` references back to full HD dataUrls
- * from local IndexedDB or Firestore cloud photos collection.
+ * from memory cache, local IndexedDB, or Firestore cloud photos collection.
  */
 export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
   const cloned: Trip = JSON.parse(JSON.stringify(trip));
@@ -188,7 +181,7 @@ export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
     if (typeof imgStr === 'string' && imgStr.startsWith('photo://')) {
       const photoId = imgStr.replace('photo://', '');
       const dataUrl = await getPhotoLocal(photoId);
-      return dataUrl || '';
+      return dataUrl || imgStr;
     }
     return imgStr;
   };
@@ -198,24 +191,19 @@ export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
       if (tab.items && Array.isArray(tab.items)) {
         for (const item of tab.items) {
           if (item.images && Array.isArray(item.images)) {
-            const resolvedList: string[] = [];
-            for (const img of item.images) {
-              const resolved = await resolveImageStr(img);
-              if (resolved && (resolved.startsWith('data:image/') || resolved.startsWith('http://') || resolved.startsWith('https://') || resolved.startsWith('blob:'))) {
-                resolvedList.push(resolved);
-              }
-            }
+            const resolvedList = await Promise.all(
+              item.images.map((img) => resolveImageStr(img))
+            );
             item.images = resolvedList;
-            item.imageUrl = resolvedList.length > 0 ? resolvedList[0] : undefined;
-          } else if (item.imageUrl) {
-            const resolved = await resolveImageStr(item.imageUrl);
-            if (resolved && (resolved.startsWith('data:image/') || resolved.startsWith('http://') || resolved.startsWith('https://') || resolved.startsWith('blob:'))) {
-              item.imageUrl = resolved;
-              item.images = [resolved];
+            if (resolvedList.length > 0) {
+              item.imageUrl = resolvedList[0];
             } else {
               delete item.imageUrl;
-              item.images = [];
             }
+          } else if (item.imageUrl) {
+            const resolved = await resolveImageStr(item.imageUrl);
+            item.imageUrl = resolved;
+            item.images = [resolved];
           }
         }
       }
@@ -223,10 +211,7 @@ export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
   }
 
   if (cloned.coverImage) {
-    const resolved = await resolveImageStr(cloned.coverImage);
-    if (resolved && (resolved.startsWith('data:image/') || resolved.startsWith('http://') || resolved.startsWith('https://') || resolved.startsWith('blob:'))) {
-      cloned.coverImage = resolved;
-    }
+    cloned.coverImage = await resolveImageStr(cloned.coverImage);
   }
 
   return cloned;

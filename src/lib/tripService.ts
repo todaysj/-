@@ -1,4 +1,4 @@
-import { collection, doc, onSnapshot, setDoc, deleteDoc, disableNetwork } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc } from 'firebase/firestore';
 import { db } from './firebase';
 import { Trip, TabType, SouvenirTabConfig, ChecklistTabConfig, ScheduleItem, Reservation, ExpenseItem, PackingItem } from '../types';
 import { INITIAL_TRIPS } from '../data/mockData';
@@ -9,73 +9,42 @@ import { saveTripBackup, saveTripsToIDB, getTripsFromIDB } from '../utils/tripIn
 const TRIPS_COLLECTION = 'trips';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
 const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
-const STORAGE_QUOTA_KEY = 'jplanner_quota_exceeded_until';
 
-// Quota Circuit Breaker & Safe Mode Tracker
-let isQuotaExceeded = false;
-let quotaExceededUntil = 0;
-let networkDisabled = false;
-
-// Initialize quota state from localStorage if previously recorded
+// Clear any stale local quota limits or circuit breakers
 try {
-  const storedUntil = typeof window !== 'undefined' ? localStorage.getItem(STORAGE_QUOTA_KEY) : null;
-  if (storedUntil) {
-    const until = parseInt(storedUntil, 10);
-    if (Date.now() < until) {
-      isQuotaExceeded = true;
-      quotaExceededUntil = until;
-      networkDisabled = true;
-      disableNetwork(db).catch(() => {});
-    }
+  if (typeof window !== 'undefined') {
+    localStorage.removeItem('jplanner_quota_exceeded_until');
   }
 } catch {}
 
-export function checkQuotaExceeded(err: any): boolean {
-  if (!err) return false;
-  const code = (err.code || '').toString().toLowerCase();
-  const msg = (err.message || '').toString().toLowerCase();
-  if (
-    code.includes('resource-exhausted') ||
-    code.includes('quota') ||
-    msg.includes('quota limit exceeded') ||
-    msg.includes('quota exceeded') ||
-    msg.includes('resource-exhausted') ||
-    msg.includes('free daily write units') ||
-    msg.includes('maximum backoff')
-  ) {
-    isQuotaExceeded = true;
-    quotaExceededUntil = Date.now() + 60 * 60 * 1000; // 1-hour cooldown
-    try {
-      localStorage.setItem(STORAGE_QUOTA_KEY, quotaExceededUntil.toString());
-    } catch {}
-    if (!networkDisabled) {
-      networkDisabled = true;
-      try {
-        disableNetwork(db).catch(() => {});
-      } catch {}
-    }
-    return true;
-  }
-  return false;
-}
-
-function shouldSkipFirestoreWrite(): boolean {
-  if (networkDisabled) return true;
-  if (isQuotaExceeded) {
-    if (Date.now() < quotaExceededUntil) {
-      return true;
-    }
-    isQuotaExceeded = false;
-  }
-  return false;
-}
-
-// Debounce trackers to conserve Firestore write quota
+// Pending trip writes debounce trackers
 const pendingTripWrites = new Map<string, ReturnType<typeof setTimeout>>();
 let pendingBrandTimer: ReturnType<typeof setTimeout> | null = null;
 
+export function removeUndefinedDeep<T>(obj: T): T {
+  if (obj === null || obj === undefined) {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj
+      .filter((item) => item !== undefined)
+      .map((item) => removeUndefinedDeep(item)) as unknown as T;
+  }
+  if (typeof obj === 'object') {
+    const res: Record<string, any> = {};
+    for (const key of Object.keys(obj as Record<string, any>)) {
+      const val = (obj as Record<string, any>)[key];
+      if (val !== undefined) {
+        res[key] = removeUndefinedDeep(val);
+      }
+    }
+    return res as T;
+  }
+  return obj;
+}
+
 export function sanitizeForFirestore<T>(data: T): T {
-  const cloned = JSON.parse(JSON.stringify(data));
+  const cloned = removeUndefinedDeep(JSON.parse(JSON.stringify(data)));
   if (cloned && typeof cloned === 'object') {
     const trip = cloned as Record<string, any>;
     if (trip.souvenirTabs && Array.isArray(trip.souvenirTabs) && trip.souvenirTabs.length > 0) {
@@ -85,7 +54,7 @@ export function sanitizeForFirestore<T>(data: T): T {
       delete trip.packingList;
     }
   }
-  return cloned;
+  return removeUndefinedDeep(cloned);
 }
 
 /**
@@ -271,18 +240,18 @@ export function reconcileSingleTrip(localTrip: Trip | undefined, remoteTrip: Tri
 }
 
 /**
- * Save trip to local cache, IndexedDB backup history, and Firestore safely
+ * Save trip to local cache, IndexedDB backup history, and direct to Firestore
  */
 export async function saveTripToFirestore(trip: Trip): Promise<void> {
   const timestampedTrip: Trip = {
     ...trip,
-    updatedAt: trip.updatedAt || Date.now()
+    updatedAt: Date.now()
   };
 
   // 1. Immediately create a safety backup in IndexedDB
   saveTripBackup(timestampedTrip).catch(() => {});
 
-  // 2. Synchronously update browser cache & IndexedDB with full data
+  // 2. Synchronously update browser cache & IndexedDB with full data for instant local response
   try {
     const currentTrips = getStoredTrips();
     const exists = currentTrips.some((t) => t.id === timestampedTrip.id);
@@ -295,27 +264,16 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     console.warn('Local cache save warning:', err);
   }
 
-  // 3. Prepare clean trip with optimized photos
+  // 3. Prepare clean trip: upload photos to Firestore `/photos/{photoId}` and replace with `photo://${photoId}`
   let cleanTrip: Trip;
   try {
-    cleanTrip = await detachTripPhotos(timestampedTrip);
+    const detached = await detachTripPhotos(timestampedTrip);
+    cleanTrip = sanitizeForFirestore(detached);
   } catch (e) {
     cleanTrip = sanitizeForFirestore(timestampedTrip);
   }
 
-  // Update localStorage with cleanTrip
-  try {
-    const currentTrips = getStoredTrips();
-    const cleanTrips = currentTrips.map((t) => (t.id === cleanTrip.id ? cleanTrip : t));
-    saveTripsToLocalStorage(cleanTrips);
-  } catch {}
-
-  // 4. If Firestore quota is exhausted or offline, skip cloud network calls
-  if (shouldSkipFirestoreWrite()) {
-    return;
-  }
-
-  // 5. Debounce Firestore network writes by 300ms to ensure fast cloud persistence
+  // 4. Quick debounce and write directly to Firestore `/trips/{cleanTrip.id}`
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
@@ -323,22 +281,19 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
 
   const timer = setTimeout(async () => {
     pendingTripWrites.delete(cleanTrip.id);
-    if (shouldSkipFirestoreWrite()) return;
-
+    const safePayload = sanitizeForFirestore(cleanTrip);
     try {
-      await setDoc(doc(db, TRIPS_COLLECTION, cleanTrip.id), cleanTrip, { merge: true });
+      await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
     } catch (err: any) {
-      if (checkQuotaExceeded(err)) {
-        return;
-      }
+      console.warn('Trip Firestore write retry:', err);
       try {
-        const fallbackTrip = sanitizeForFirestore(cleanTrip);
+        const fallbackTrip = sanitizeForFirestore(safePayload);
         await setDoc(doc(db, TRIPS_COLLECTION, fallbackTrip.id), fallbackTrip, { merge: true });
-      } catch (finalErr: any) {
-        checkQuotaExceeded(finalErr);
+      } catch (finalErr) {
+        console.error('Failed to save trip to Firestore:', finalErr);
       }
     }
-  }, 300);
+  }, 40);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
@@ -363,43 +318,29 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     console.warn('Local cache delete warning:', err);
   }
 
-  // 2. If quota exhausted, skip cloud deletion
-  if (shouldSkipFirestoreWrite()) {
-    return;
-  }
-
-  // 3. Delete from Firestore
+  // 2. Delete from Firestore
   try {
     await deleteDoc(doc(db, TRIPS_COLLECTION, tripId));
   } catch (err: any) {
-    checkQuotaExceeded(err);
+    console.error('Failed to delete trip from Firestore:', err);
   }
 }
 
+/**
+ * Real-time subscription to Firestore `trips` collection.
+ * Ensures all connected devices (mobiles, PCs, Netlify) share the exact same live state.
+ */
 export function subscribeToTrips(
   onUpdate: (trips: Trip[]) => void,
   onError?: (error: Error) => void
 ) {
   let unsubscribe: (() => void) | null = null;
 
-  // Immediately serve latest from IndexedDB / localStorage
-  getTripsFromIDB().then(async (idbTrips) => {
+  // Immediately serve latest from IndexedDB / localStorage while connecting to Firestore
+  getTripsFromIDB().then((idbTrips) => {
     const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-    const resolvedInitial = await Promise.all(
-      initial.map(async (t) => {
-        try {
-          return await resolveTripPhotos(t);
-        } catch {
-          return t;
-        }
-      })
-    );
-    onUpdate(resolvedInitial);
+    onUpdate(initial);
   });
-
-  if (shouldSkipFirestoreWrite()) {
-    return () => {};
-  }
 
   try {
     const tripsRef = collection(db, TRIPS_COLLECTION);
@@ -407,13 +348,14 @@ export function subscribeToTrips(
       tripsRef,
       async (snapshot) => {
         if (snapshot.empty) {
+          // If Firestore is completely empty on first launch, seed once with default trips
           const idbTrips = await getTripsFromIDB();
           const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
           onUpdate(initial);
-          // Seed remote Firestore if project is newly connected
           if (initial && initial.length > 0) {
             for (const trip of initial) {
-              setDoc(doc(db, TRIPS_COLLECTION, trip.id), trip, { merge: true }).catch(() => {});
+              const clean = sanitizeForFirestore(await detachTripPhotos(trip));
+              setDoc(doc(db, TRIPS_COLLECTION, clean.id), clean, { merge: true }).catch(() => {});
             }
           }
         } else {
@@ -422,23 +364,12 @@ export function subscribeToTrips(
             rawRemoteTrips.push(docSnap.data() as Trip);
           });
 
-          // Resolve photos asynchronously
-          const remoteTrips = await Promise.all(
-            rawRemoteTrips.map(async (trip) => {
-              try {
-                return await resolveTripPhotos(trip);
-              } catch {
-                return trip;
-              }
-            })
-          );
-
-          // Treat Firestore remote trips as authoritative for cross-device & Netlify parity
+          // Sort trips cleanly
           const idbTrips = await getTripsFromIDB();
           const localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
           const finalTrips: Trip[] = [];
 
-          remoteTrips.forEach((remote) => {
+          rawRemoteTrips.forEach((remote) => {
             const local = localTrips.find((t) => t.id === remote.id);
             if (local && pendingTripWrites.has(remote.id)) {
               finalTrips.push(reconcileSingleTrip(local, remote));
@@ -454,28 +385,34 @@ export function subscribeToTrips(
             }
           }
 
+          // Save authoritative state to local storage & IndexedDB
           saveTripsToLocalStorage(finalTrips);
           saveTripsToIDB(finalTrips).catch(() => {});
+
+          // Immediately update state so all connected devices see the new schedule and souvenirs instantly
           onUpdate(finalTrips);
+
+          // Resolve photos in the background and update state once photos are ready
+          resolveTripPhotosList(finalTrips).then((resolved) => {
+            saveTripsToIDB(resolved).catch(() => {});
+            const hasChanges = JSON.stringify(resolved) !== JSON.stringify(finalTrips);
+            if (hasChanges) {
+              onUpdate(resolved);
+            }
+          });
         }
       },
       (err: any) => {
-        checkQuotaExceeded(err);
-        if (unsubscribe) {
-          try {
-            unsubscribe();
-            unsubscribe = null;
-          } catch {}
-        }
+        console.error('Firestore trips subscription error:', err);
         getTripsFromIDB().then((idbTrips) => {
           const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
           onUpdate(fallback);
         });
-        if (onError && !isQuotaExceeded) onError(err);
+        if (onError) onError(err);
       }
     );
   } catch (err: any) {
-    checkQuotaExceeded(err);
+    console.error('Firestore trips connection error:', err);
     getTripsFromIDB().then((idbTrips) => {
       const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
       onUpdate(fallback);
@@ -492,6 +429,25 @@ export function subscribeToTrips(
   };
 }
 
+async function resolveTripPhotosList(tripsList: Trip[]): Promise<Trip[]> {
+  try {
+    return await Promise.all(
+      tripsList.map(async (trip) => {
+        try {
+          return await resolveTripPhotos(trip);
+        } catch {
+          return trip;
+        }
+      })
+    );
+  } catch {
+    return tripsList;
+  }
+}
+
+/**
+ * Real-time subscription to Firestore `settings/brand` document.
+ */
 export function subscribeToBrandSettings(
   onUpdate: (settings: {
     title: string;
@@ -504,10 +460,6 @@ export function subscribeToBrandSettings(
 ) {
   // Immediately provide cached brand settings
   onUpdate(getStoredBrandSettings());
-
-  if (shouldSkipFirestoreWrite()) {
-    return () => {};
-  }
 
   let unsubscribe: (() => void) | null = null;
   try {
@@ -534,18 +486,12 @@ export function subscribeToBrandSettings(
         }
       },
       (err: any) => {
-        checkQuotaExceeded(err);
-        if (unsubscribe) {
-          try {
-            unsubscribe();
-            unsubscribe = null;
-          } catch {}
-        }
+        console.error('Brand settings subscription error:', err);
         onUpdate(getStoredBrandSettings());
       }
     );
   } catch (err) {
-    checkQuotaExceeded(err);
+    console.error('Brand settings connection error:', err);
     onUpdate(getStoredBrandSettings());
   }
 
@@ -558,6 +504,9 @@ export function subscribeToBrandSettings(
   };
 }
 
+/**
+ * Persist Brand settings directly to Firestore `settings/brand`
+ */
 export async function saveBrandSettingsToFirestore(settings: {
   title: string;
   subtitle: string;
@@ -575,22 +524,17 @@ export async function saveBrandSettingsToFirestore(settings: {
     console.warn('Brand local cache warning:', err);
   }
 
-  if (shouldSkipFirestoreWrite()) {
-    return;
-  }
-
   if (pendingBrandTimer) {
     clearTimeout(pendingBrandTimer);
   }
 
   pendingBrandTimer = setTimeout(async () => {
     pendingBrandTimer = null;
-    if (shouldSkipFirestoreWrite()) return;
-
     try {
-      await setDoc(doc(db, 'settings', 'brand'), settings, { merge: true });
+      const safeSettings = removeUndefinedDeep(settings);
+      await setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
     } catch (err: any) {
-      checkQuotaExceeded(err);
+      console.error('Failed to save brand settings to Firestore:', err);
     }
-  }, 800);
+  }, 300);
 }

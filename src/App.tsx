@@ -35,6 +35,53 @@ import { getTripsFromIDB } from './utils/tripIndexedDB';
 
 const STORAGE_LAST_TRIP_KEY = 'jplanner_last_active_trip_id';
 
+const getUrlTripId = (): string | null => {
+  try {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('trip') || null;
+    }
+  } catch {}
+  return null;
+};
+
+const resolveBestTripId = (
+  tripList: Trip[],
+  currentActiveId?: string,
+  orderList?: string[]
+): string => {
+  if (!tripList || tripList.length === 0) return 'tokyo-2026';
+
+  // 1. URL parameter has top priority
+  const urlTrip = getUrlTripId();
+  if (urlTrip && tripList.some((t) => t.id === urlTrip)) {
+    return urlTrip;
+  }
+
+  // 2. Current active state if valid
+  if (currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
+    return currentActiveId;
+  }
+
+  // 3. Stored localStorage ID if valid
+  try {
+    const stored = localStorage.getItem(STORAGE_LAST_TRIP_KEY);
+    if (stored && tripList.some((t) => t.id === stored)) {
+      return stored;
+    }
+  } catch {}
+
+  // 4. Trip ordered by brand settings if available
+  if (orderList && orderList.length > 0) {
+    const firstOrdered = tripList.find((t) => t.id === orderList[0]);
+    if (firstOrdered) return firstOrdered.id;
+  }
+
+  // 5. Most recently updated trip (highest updatedAt)
+  const sortedByRecent = [...tripList].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  return sortedByRecent[0].id;
+};
+
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
   if (!order || order.length === 0) return tripsToSort;
   const orderMap = new Map(order.map((id, index) => [id, index]));
@@ -48,11 +95,14 @@ const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
 export default function App() {
   const [trips, setTrips] = useState<Trip[]>(() => getStoredTrips());
   const [activeTripId, setActiveTripId] = useState<string>(() => {
+    const urlId = getUrlTripId();
+    if (urlId) return urlId;
     try {
       const saved = localStorage.getItem(STORAGE_LAST_TRIP_KEY);
       if (saved) return saved;
     } catch (e) {}
-    return 'tokyo-2026';
+    const initialList = getStoredTrips();
+    return resolveBestTripId(initialList);
   });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -69,38 +119,6 @@ export default function App() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, []);
-
-  // Proactive Cloud Sync on Startup: Synchronize all current trips, photos, and brand settings
-  // directly to Firestore so deployed sites (Netlify, mobile, etc.) display the exact same data and photos
-  useEffect(() => {
-    const syncAllToFirestore = async () => {
-      try {
-        const idbTrips = await getTripsFromIDB();
-        const localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-        if (localTrips && localTrips.length > 0) {
-          for (const trip of localTrips) {
-            const resolved = await resolveTripPhotos(trip);
-            saveTripToFirestore(resolved).catch(() => {});
-          }
-        }
-        const brand = getStoredBrandSettings();
-        if (brand) {
-          saveBrandSettingsToFirestore(brand).catch(() => {});
-        }
-        const localPhotos = await getAllLocalPhotos();
-        if (localPhotos && localPhotos.length > 0) {
-          for (const item of localPhotos) {
-            if (item.photoId && item.dataUrl && item.dataUrl.startsWith('data:image/')) {
-              savePhotoToCloud(item.photoId, item.dataUrl).catch(() => {});
-            }
-          }
-        }
-      } catch (err) {
-        console.warn('Initial cloud sync notice:', err);
-      }
-    };
-    syncAllToFirestore();
   }, []);
 
   // Custom Brand Header & Tab Order State & Security
@@ -146,11 +164,16 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isTripOrderModalOpen, setIsTripOrderModalOpen] = useState(false);
 
-  // Helper to switch active trip and save to localStorage
+  // Helper to switch active trip, sync URL and save to localStorage
   const handleSelectTrip = (tripId: string) => {
     setActiveTripId(tripId);
     try {
       localStorage.setItem(STORAGE_LAST_TRIP_KEY, tripId);
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href);
+        url.searchParams.set('trip', tripId);
+        window.history.replaceState({}, '', url.toString());
+      }
     } catch (e) {}
   };
 
@@ -161,17 +184,14 @@ export default function App() {
         const sorted = sortTripsWithOrder(remoteTrips, tripOrderRef.current);
         setTrips(sorted);
         setActiveTripId((prevId) => {
-          let candidateId = prevId;
-          try {
-            const stored = localStorage.getItem(STORAGE_LAST_TRIP_KEY);
-            if (stored && remoteTrips.some((t) => t.id === stored)) {
-              candidateId = stored;
-            }
-          } catch (e) {}
-          const exists = remoteTrips.some((t) => t.id === candidateId);
-          const resolved = exists ? candidateId : remoteTrips[0].id;
+          const resolved = resolveBestTripId(sorted, prevId, tripOrderRef.current);
           try {
             localStorage.setItem(STORAGE_LAST_TRIP_KEY, resolved);
+            if (typeof window !== 'undefined') {
+              const url = new URL(window.location.href);
+              url.searchParams.set('trip', resolved);
+              window.history.replaceState({}, '', url.toString());
+            }
           } catch (e) {}
           return resolved;
         });
@@ -221,15 +241,13 @@ export default function App() {
 
   // Helper to update active trip locally & persist to Firestore
   const updateActiveTrip = (updater: (trip: Trip) => Trip) => {
-    if (!activeTrip) return;
-    const updatedTrip = { ...updater(activeTrip), updatedAt: Date.now() };
-
-    setTrips((prevTrips) =>
-      prevTrips.map((t) => (t.id === activeTrip.id ? updatedTrip : t))
-    );
-
-    // Save to Firestore in real-time
-    saveTripToFirestore(updatedTrip);
+    setTrips((prevTrips) => {
+      const current = prevTrips.find((t) => t.id === activeTripId) || prevTrips[0];
+      if (!current) return prevTrips;
+      const updatedTrip = { ...updater(current), updatedAt: Date.now() };
+      saveTripToFirestore(updatedTrip);
+      return prevTrips.map((t) => (t.id === current.id ? updatedTrip : t));
+    });
   };
 
   // Brand Header & Tab Order Handlers
