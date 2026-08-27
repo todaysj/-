@@ -48,7 +48,8 @@ const getUrlTripId = (): string | null => {
 const resolveBestTripId = (
   tripList: Trip[],
   currentActiveId?: string,
-  orderList?: string[]
+  orderList?: string[],
+  userSelectedExplicitly?: boolean
 ): string => {
   if (!tripList || tripList.length === 0) return 'tokyo-2026';
 
@@ -58,28 +59,26 @@ const resolveBestTripId = (
     return urlTrip;
   }
 
-  // 2. Current active state if valid
-  if (currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
+  // 2. If user explicitly switched trip during this session, keep it
+  if (userSelectedExplicitly && currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
     return currentActiveId;
   }
 
-  // 3. Stored localStorage ID if valid
-  try {
-    const stored = localStorage.getItem(STORAGE_LAST_TRIP_KEY);
-    if (stored && tripList.some((t) => t.id === stored)) {
-      return stored;
-    }
-  } catch {}
-
-  // 4. Trip ordered by brand settings if available
+  // 3. Primary trip configured in Cloud tripOrder settings
   if (orderList && orderList.length > 0) {
     const firstOrdered = tripList.find((t) => t.id === orderList[0]);
     if (firstOrdered) return firstOrdered.id;
   }
 
-  // 5. Most recently updated trip (highest updatedAt)
-  const sortedByRecent = [...tripList].sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-  return sortedByRecent[0].id;
+  // 4. Default to first trip in list or trip with schedules
+  const sorted = [...tripList].sort((a, b) => {
+    const aSched = a.schedule?.length || 0;
+    const bSched = b.schedule?.length || 0;
+    if (bSched !== aSched) return bSched - aSched;
+    return (b.updatedAt || 0) - (a.updatedAt || 0);
+  });
+
+  return sorted[0].id;
 };
 
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
@@ -94,15 +93,14 @@ const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
 
 export default function App() {
   const [trips, setTrips] = useState<Trip[]>(() => getStoredTrips());
+  const initialBrand = getStoredBrandSettings();
+  const userExplicitlySelectedRef = useRef<boolean>(false);
+
   const [activeTripId, setActiveTripId] = useState<string>(() => {
     const urlId = getUrlTripId();
     if (urlId) return urlId;
-    try {
-      const saved = localStorage.getItem(STORAGE_LAST_TRIP_KEY);
-      if (saved) return saved;
-    } catch (e) {}
     const initialList = getStoredTrips();
-    return resolveBestTripId(initialList);
+    return resolveBestTripId(initialList, undefined, initialBrand.tripOrder);
   });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -122,7 +120,6 @@ export default function App() {
   }, []);
 
   // Custom Brand Header & Tab Order State & Security
-  const initialBrand = getStoredBrandSettings();
   const [brandTitle, setBrandTitle] = useState<string>(initialBrand.title);
   const [brandSubtitle, setBrandSubtitle] = useState<string>(initialBrand.subtitle);
   const [brandBadge, setBrandBadge] = useState<string>(initialBrand.badge);
@@ -166,6 +163,7 @@ export default function App() {
 
   // Helper to switch active trip, sync URL and save to localStorage
   const handleSelectTrip = (tripId: string) => {
+    userExplicitlySelectedRef.current = true;
     setActiveTripId(tripId);
     try {
       localStorage.setItem(STORAGE_LAST_TRIP_KEY, tripId);
@@ -184,7 +182,12 @@ export default function App() {
         const sorted = sortTripsWithOrder(remoteTrips, tripOrderRef.current);
         setTrips(sorted);
         setActiveTripId((prevId) => {
-          const resolved = resolveBestTripId(sorted, prevId, tripOrderRef.current);
+          const resolved = resolveBestTripId(
+            sorted,
+            prevId,
+            tripOrderRef.current,
+            userExplicitlySelectedRef.current
+          );
           try {
             localStorage.setItem(STORAGE_LAST_TRIP_KEY, resolved);
             if (typeof window !== 'undefined') {
@@ -217,7 +220,14 @@ export default function App() {
       if (settings.tripOrder && Array.isArray(settings.tripOrder)) {
         setTripOrder(settings.tripOrder);
         tripOrderRef.current = settings.tripOrder;
-        setTrips((prev) => sortTripsWithOrder(prev, settings.tripOrder));
+        setTrips((prev) => {
+          const sorted = sortTripsWithOrder(prev, settings.tripOrder);
+          if (!userExplicitlySelectedRef.current && sorted.length > 0) {
+            const bestId = resolveBestTripId(sorted, undefined, settings.tripOrder, false);
+            setActiveTripId(bestId);
+          }
+          return sorted;
+        });
       }
       if (settings.adminPassword) {
         setAdminPassword(settings.adminPassword);
