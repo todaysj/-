@@ -35,50 +35,34 @@ import { getTripsFromIDB } from './utils/tripIndexedDB';
 
 const STORAGE_LAST_TRIP_KEY = 'jplanner_last_active_trip_id';
 
-const getUrlTripId = (): string | null => {
-  try {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('trip') || null;
-    }
-  } catch {}
-  return null;
-};
-
 const resolveBestTripId = (
   tripList: Trip[],
   currentActiveId?: string,
   orderList?: string[],
   userSelectedExplicitly?: boolean
 ): string => {
-  if (!tripList || tripList.length === 0) return 'tokyo-2026';
+  if (!tripList || tripList.length === 0) return 'trip-1787213502723';
 
-  // 1. URL parameter has top priority
-  const urlTrip = getUrlTripId();
-  if (urlTrip && tripList.some((t) => t.id === urlTrip)) {
-    return urlTrip;
-  }
-
-  // 2. If user explicitly switched trip during this session, keep it
+  // 1. If user explicitly switched trip during this active session, preserve their explicit choice
   if (userSelectedExplicitly && currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
     return currentActiveId;
   }
 
-  // 3. Primary trip configured in Cloud tripOrder settings
+  // 2. Primary trip configured in Cloud tripOrder settings (Highest Priority)
   if (orderList && orderList.length > 0) {
     const firstOrdered = tripList.find((t) => t.id === orderList[0]);
     if (firstOrdered) return firstOrdered.id;
   }
 
-  // 4. Default to first trip in list or trip with schedules
-  const sorted = [...tripList].sort((a, b) => {
+  // 3. Trip with the most registered schedule items
+  const sortedBySchedule = [...tripList].sort((a, b) => {
     const aSched = a.schedule?.length || 0;
     const bSched = b.schedule?.length || 0;
     if (bSched !== aSched) return bSched - aSched;
     return (b.updatedAt || 0) - (a.updatedAt || 0);
   });
 
-  return sorted[0].id;
+  return sortedBySchedule[0]?.id || tripList[0].id;
 };
 
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
@@ -97,14 +81,22 @@ export default function App() {
   const userExplicitlySelectedRef = useRef<boolean>(false);
 
   const [activeTripId, setActiveTripId] = useState<string>(() => {
-    const urlId = getUrlTripId();
-    if (urlId) return urlId;
     const initialList = getStoredTrips();
-    return resolveBestTripId(initialList, undefined, initialBrand.tripOrder);
+    return resolveBestTripId(initialList, undefined, initialBrand.tripOrder, false);
   });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isOffline, setIsOffline] = useState<boolean>(() => !navigator.onLine);
+
+  // Clean URL bar from old query params if any
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined' && window.location.search) {
+        const cleanUrl = window.location.pathname;
+        window.history.replaceState({}, '', cleanUrl);
+      }
+    } catch {}
+  }, []);
 
   useEffect(() => {
     const handleOnline = () => setIsOffline(false);

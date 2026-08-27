@@ -317,7 +317,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   {trips.map((trip) => (
                     <option key={trip.id} value={trip.id}>
-                      ✈️ {trip.title}
+                      ✈️ {trip.title} ({trip.schedule?.length || 0}개 일정)
                     </option>
                   ))}
                 </select>
