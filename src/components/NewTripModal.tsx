@@ -14,31 +14,38 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({ onClose, onSave }) =
   const [endDate, setEndDate] = useState('2026-10-04');
   const [totalBudget, setTotalBudget] = useState('1000000');
   const [currency, setCurrency] = useState('KRW');
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !destination.trim()) return;
+    if (!title.trim() || !destination.trim() || isSaving) return;
 
-    const newTrip: Trip = {
-      id: `trip-${Date.now()}`,
-      title: title.trim(),
-      destination: destination.trim(),
-      startDate,
-      endDate,
-      coverImage: 'https://images.unsplash.com/photo-1488646953014-85cb44e25828?auto=format&fit=crop&w=1200&q=80',
-      totalBudget: Number(totalBudget) || 1000000,
-      currency,
-      schedule: [],
-      reservations: [],
-      expenses: [],
-      packingList: [
-        { id: 'p1', category: '필수 준비물', title: '여권/신분증 지참', isPacked: false, isEssential: true },
-        { id: 'p2', category: '필수 준비물', title: '스마트폰 충전기 & 보조배터리', isPacked: false, isEssential: true }
-      ]
-    };
+    setIsSaving(true);
+    try {
+      const newTrip: Trip = {
+        id: `trip-${Date.now()}`,
+        title: title.trim(),
+        destination: destination.trim(),
+        startDate,
+        endDate,
+        coverImage: 'https://images.unsplash.com/photo-1488646953014-85cb44e25828?auto=format&fit=crop&w=1200&q=80',
+        totalBudget: Number(totalBudget) || 1000000,
+        currency,
+        schedule: [],
+        reservations: [],
+        expenses: [],
+        packingList: [
+          { id: 'p1', category: '필수 준비물', title: '여권/신분증 지참', isPacked: false, isEssential: true },
+          { id: 'p2', category: '필수 준비물', title: '스마트폰 충전기 & 보조배터리', isPacked: false, isEssential: true }
+        ]
+      };
 
-    onSave(newTrip);
-    onClose();
+      onSave(newTrip);
+      onClose();
+    } catch (err) {
+      console.error('상세 에러 (NewTripModal handleSubmit):', err);
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -123,9 +130,10 @@ export const NewTripModal: React.FC<NewTripModalProps> = ({ onClose, onSave }) =
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl shadow-md transition"
+              disabled={isSaving}
+              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer"
             >
-              플랜 만들기
+              <span>{isSaving ? '저장 중...' : '플랜 만들기'}</span>
             </button>
           </div>
         </form>

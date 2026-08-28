@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
 import { Trip, TabType } from '../types';
-import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2 } from 'lucide-react';
+import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { getTripChecklistTabs, getTripSouvenirTabs } from '../utils/tabUtils';
+import { SyncStatus } from '../lib/tripService';
 
 interface NavbarProps {
   trips: Trip[];
@@ -21,6 +22,8 @@ interface NavbarProps {
   onOpenBrandModal: () => void;
   onOpenExportModal: () => void;
   onLockSite?: () => void;
+  syncStatus?: SyncStatus;
+  syncMessage?: string;
 }
 
 const DEFAULT_NAV_TABS: TabType[] = ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'];
@@ -42,10 +45,59 @@ export const Navbar: React.FC<NavbarProps> = ({
   tabOrder = DEFAULT_NAV_TABS,
   onOpenBrandModal,
   onOpenExportModal,
-  onLockSite
+  onLockSite,
+  syncStatus = 'synced',
+  syncMessage
 }) => {
   const checklistTabs = getTripChecklistTabs(activeTrip);
   const souvenirTabs = getTripSouvenirTabs(activeTrip);
+
+  // Helper for DB Sync Status badge
+  const renderSyncBadge = () => {
+    switch (syncStatus) {
+      case 'connecting':
+        return (
+          <div
+            className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 transition shadow-xs shrink-0"
+            title={syncMessage || '클라우드 실시간 DB 연결 대기 중...'}
+          >
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+            <span>연결 대기 중</span>
+          </div>
+        );
+      case 'saving':
+        return (
+          <div
+            className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/40 transition shadow-xs shrink-0 animate-pulse"
+            title="클라우드 저장 중..."
+          >
+            <RefreshCw className="w-3 h-3 animate-spin text-sky-400" />
+            <span>저장 중...</span>
+          </div>
+        );
+      case 'error':
+        return (
+          <div
+            className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 transition shadow-xs shrink-0 cursor-pointer"
+            title={syncMessage || '클라우드 DB 연결 오류'}
+          >
+            <AlertCircle className="w-3 h-3 text-rose-400" />
+            <span>연결 오류</span>
+          </div>
+        );
+      case 'synced':
+      default:
+        return (
+          <div
+            className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 transition shadow-xs shrink-0"
+            title="모든 기기 실시간 동기화 완료"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
+            <span>실시간 동기화됨</span>
+          </div>
+        );
+    }
+  };
 
   // Calculate D-day
   const calculateDDay = (startDateStr: string) => {
@@ -296,11 +348,14 @@ export const Navbar: React.FC<NavbarProps> = ({
               </div>
             </div>
 
-            {/* D-Day badge for mobile */}
-            <div className="flex items-center space-x-1.5 lg:hidden">
-              <span className="px-2.5 py-1 bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold rounded-full shrink-0">
-                {dDayText}
-              </span>
+            {/* Sync Status Badge & D-Day badge for mobile */}
+            <div className="flex items-center space-x-1.5 shrink-0">
+              {renderSyncBadge()}
+              <div className="lg:hidden">
+                <span className="px-2.5 py-1 bg-amber-500/20 text-amber-300 border border-amber-500/30 text-xs font-bold rounded-full shrink-0">
+                  {dDayText}
+                </span>
+              </div>
             </div>
           </div>
 

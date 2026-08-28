@@ -17,25 +17,32 @@ export const ReservationModal: React.FC<ReservationModalProps> = ({ onClose, onS
   const [details, setDetails] = useState('');
   const [price, setPrice] = useState('');
   const [fileName, setFileName] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !confirmationNo.trim()) return;
+    if (!title.trim() || !confirmationNo.trim() || isSaving) return;
 
-    onSave({
-      title: title.trim(),
-      category,
-      provider: provider.trim() || '온라인 예약',
-      confirmationNo: confirmationNo.trim(),
-      date: date.trim() || '일자 미정',
-      time: time.trim(),
-      details: details.trim(),
-      price: Number(price) || 0,
-      currency: 'KRW',
-      fileName: fileName ? fileName : undefined
-    });
+    setIsSaving(true);
+    try {
+      onSave({
+        title: title.trim(),
+        category,
+        provider: provider.trim() || '온라인 예약',
+        confirmationNo: confirmationNo.trim(),
+        date: date.trim() || '일자 미정',
+        time: time.trim(),
+        details: details.trim(),
+        price: Number(price) || 0,
+        currency: 'KRW',
+        fileName: fileName ? fileName : undefined
+      });
 
-    onClose();
+      onClose();
+    } catch (err) {
+      console.error('상세 에러 (ReservationModal handleSubmit):', err);
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -157,9 +164,10 @@ export const ReservationModal: React.FC<ReservationModalProps> = ({ onClose, onS
             </button>
             <button
               type="submit"
-              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl shadow-md transition"
+              disabled={isSaving}
+              className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer"
             >
-              서류 저장
+              <span>{isSaving ? '저장 중...' : '서류 저장'}</span>
             </button>
           </div>
         </form>

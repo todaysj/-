@@ -10,12 +10,74 @@ const TRIPS_COLLECTION = 'trips';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
 const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
 
-// Clear any stale local quota limits or circuit breakers
+export type SyncStatus = 'connecting' | 'synced' | 'saving' | 'error';
+
+export interface SyncStatusInfo {
+  status: SyncStatus;
+  message?: string;
+  timestamp: number;
+}
+
+// Global sync listeners
+const syncStatusListeners = new Set<(info: SyncStatusInfo) => void>();
+const firestoreErrorListeners = new Set<(errorMsg: string, rawError?: any) => void>();
+
+let currentSyncStatus: SyncStatusInfo = {
+  status: 'connecting',
+  message: 'DB 연결 중...',
+  timestamp: Date.now()
+};
+
+export function subscribeToSyncStatus(listener: (info: SyncStatusInfo) => void) {
+  syncStatusListeners.add(listener);
+  listener(currentSyncStatus);
+  return () => {
+    syncStatusListeners.delete(listener);
+  };
+}
+
+export function subscribeToFirestoreErrors(listener: (errorMsg: string, rawError?: any) => void) {
+  firestoreErrorListeners.add(listener);
+  return () => {
+    firestoreErrorListeners.delete(listener);
+  };
+}
+
+export function updateSyncStatus(status: SyncStatus, message?: string) {
+  currentSyncStatus = {
+    status,
+    message,
+    timestamp: Date.now()
+  };
+  syncStatusListeners.forEach((listener) => {
+    try {
+      listener(currentSyncStatus);
+    } catch (err) {
+      console.error('상세 에러 (SyncStatus Listener):', err);
+    }
+  });
+}
+
+export function notifyFirestoreError(userFriendlyMsg: string, rawError?: any) {
+  console.error('상세 에러 (Firestore):', userFriendlyMsg, rawError);
+  updateSyncStatus('error', userFriendlyMsg);
+  firestoreErrorListeners.forEach((listener) => {
+    try {
+      listener(userFriendlyMsg, rawError);
+    } catch (err) {
+      console.error('상세 에러 (FirestoreError Listener):', err);
+    }
+  });
+}
+
+// Clear any stale local quota limits
 try {
   if (typeof window !== 'undefined') {
     localStorage.removeItem('jplanner_quota_exceeded_until');
   }
-} catch {}
+} catch (error) {
+  console.error('상세 에러 (localStorage clear):', error);
+}
 
 // Pending trip writes debounce trackers
 const pendingTripWrites = new Map<string, ReturnType<typeof setTimeout>>();
@@ -69,8 +131,8 @@ export function getStoredTrips(): Trip[] {
         return parsed;
       }
     }
-  } catch (err) {
-    console.warn('Failed to load trips from browser cache:', err);
+  } catch (error) {
+    console.error('상세 에러 (getStoredTrips):', error);
   }
   return INITIAL_TRIPS;
 }
@@ -81,8 +143,8 @@ export function getStoredTrips(): Trip[] {
 export function saveTripsToLocalStorage(trips: Trip[]): void {
   try {
     localStorage.setItem(STORAGE_TRIPS_KEY, JSON.stringify(trips));
-  } catch (err) {
-    console.warn('Failed to save trips to browser cache:', err);
+  } catch (error) {
+    console.error('상세 에러 (saveTripsToLocalStorage):', error);
   }
 }
 
@@ -107,12 +169,14 @@ export function getStoredBrandSettings() {
       if (res.adminPassword) {
         try {
           localStorage.setItem('jplanner_site_password', res.adminPassword);
-        } catch (e) {}
+        } catch (pwErr) {
+          console.error('상세 에러 (site_password cache):', pwErr);
+        }
       }
       return res;
     }
-  } catch (err) {
-    console.warn('Failed to load brand settings from cache:', err);
+  } catch (error) {
+    console.error('상세 에러 (getStoredBrandSettings):', error);
   }
   return defaults;
 }
@@ -248,8 +312,12 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     updatedAt: Date.now()
   };
 
+  updateSyncStatus('saving', '데이터 저장 중...');
+
   // 1. Immediately create a safety backup in IndexedDB
-  saveTripBackup(timestampedTrip).catch(() => {});
+  saveTripBackup(timestampedTrip).catch((err) => {
+    console.error('상세 에러 (saveTripBackup):', err);
+  });
 
   // 2. Synchronously update browser cache & IndexedDB with full data for instant local response
   try {
@@ -259,9 +327,11 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
       ? currentTrips.map((t) => (t.id === timestampedTrip.id ? timestampedTrip : t))
       : [timestampedTrip, ...currentTrips];
     saveTripsToLocalStorage(updatedTrips);
-    saveTripsToIDB(updatedTrips).catch(() => {});
+    saveTripsToIDB(updatedTrips).catch((err) => {
+      console.error('상세 에러 (saveTripsToIDB):', err);
+    });
   } catch (err) {
-    console.warn('Local cache save warning:', err);
+    console.error('상세 에러 (saveTripToFirestore local cache):', err);
   }
 
   // 3. Prepare clean trip: upload photos to Firestore `/photos/{photoId}` and replace with `photo://${photoId}`
@@ -270,6 +340,7 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     const detached = await detachTripPhotos(timestampedTrip);
     cleanTrip = sanitizeForFirestore(detached);
   } catch (e) {
+    console.error('상세 에러 (detachTripPhotos):', e);
     cleanTrip = sanitizeForFirestore(timestampedTrip);
   }
 
@@ -284,13 +355,19 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     const safePayload = sanitizeForFirestore(cleanTrip);
     try {
       await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
-      console.warn('Trip Firestore write retry:', err);
+      console.error('상세 에러 (Firestore setDoc retry):', err);
       try {
         const fallbackTrip = sanitizeForFirestore(safePayload);
         await setDoc(doc(db, TRIPS_COLLECTION, fallbackTrip.id), fallbackTrip, { merge: true });
-      } catch (finalErr) {
-        console.error('Failed to save trip to Firestore:', finalErr);
+        updateSyncStatus('synced', '실시간 동기화됨');
+      } catch (finalErr: any) {
+        console.error('상세 에러 (Firestore setDoc final):', finalErr);
+        const errMsg = finalErr?.code === 'permission-denied'
+          ? 'Firebase 데이터 저장 권한이 거부되었습니다 (Permission Denied).'
+          : '클라우드 데이터 저장에 실패했습니다. 네트워크를 확인해주세요.';
+        notifyFirestoreError(errMsg, finalErr);
       }
     }
   }, 40);
@@ -308,21 +385,30 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     pendingTripWrites.delete(tripId);
   }
 
+  updateSyncStatus('saving', '여행 삭제 중...');
+
   // 1. Immediately update browser cache and IndexedDB
   try {
     const currentTrips = getStoredTrips();
     const updatedTrips = currentTrips.filter((t) => t.id !== tripId);
     saveTripsToLocalStorage(updatedTrips);
-    saveTripsToIDB(updatedTrips).catch(() => {});
+    saveTripsToIDB(updatedTrips).catch((err) => {
+      console.error('상세 에러 (deleteTrip IDB):', err);
+    });
   } catch (err) {
-    console.warn('Local cache delete warning:', err);
+    console.error('상세 에러 (deleteTrip local cache):', err);
   }
 
   // 2. Delete from Firestore
   try {
     await deleteDoc(doc(db, TRIPS_COLLECTION, tripId));
+    updateSyncStatus('synced', '실시간 동기화됨');
   } catch (err: any) {
-    console.error('Failed to delete trip from Firestore:', err);
+    console.error('상세 에러 (deleteDoc from Firestore):', err);
+    const errMsg = err?.code === 'permission-denied'
+      ? 'Firebase 삭제 권한이 거부되었습니다 (Permission Denied).'
+      : '클라우드 여행 삭제 중 오류가 발생했습니다.';
+    notifyFirestoreError(errMsg, err);
   }
 }
 
@@ -335,11 +421,14 @@ export function subscribeToTrips(
   onError?: (error: Error) => void
 ) {
   let unsubscribe: (() => void) | null = null;
+  updateSyncStatus('connecting', '클라우드 DB 동기화 연결 중...');
 
   // Immediately serve latest from IndexedDB / localStorage while connecting to Firestore
   getTripsFromIDB().then((idbTrips) => {
     const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
     onUpdate(initial);
+  }).catch((err) => {
+    console.error('상세 에러 (getTripsFromIDB initial):', err);
   });
 
   try {
@@ -347,16 +436,23 @@ export function subscribeToTrips(
     unsubscribe = onSnapshot(
       tripsRef,
       async (snapshot) => {
+        updateSyncStatus('synced', '실시간 동기화됨');
         if (snapshot.empty) {
           // If Firestore is completely empty on first launch, seed once with default trips
-          const idbTrips = await getTripsFromIDB();
-          const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-          onUpdate(initial);
-          if (initial && initial.length > 0) {
-            for (const trip of initial) {
-              const clean = sanitizeForFirestore(await detachTripPhotos(trip));
-              setDoc(doc(db, TRIPS_COLLECTION, clean.id), clean, { merge: true }).catch(() => {});
+          try {
+            const idbTrips = await getTripsFromIDB();
+            const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+            onUpdate(initial);
+            if (initial && initial.length > 0) {
+              for (const trip of initial) {
+                const clean = sanitizeForFirestore(await detachTripPhotos(trip));
+                setDoc(doc(db, TRIPS_COLLECTION, clean.id), clean, { merge: true }).catch((err) => {
+                  console.error('상세 에러 (seed initial trip):', err);
+                });
+              }
             }
+          } catch (seedErr) {
+            console.error('상세 에러 (seed default trips):', seedErr);
           }
         } else {
           const rawRemoteTrips: Trip[] = [];
@@ -364,9 +460,15 @@ export function subscribeToTrips(
             rawRemoteTrips.push(docSnap.data() as Trip);
           });
 
-          // Sort trips cleanly
-          const idbTrips = await getTripsFromIDB();
-          const localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+          let localTrips: Trip[] = [];
+          try {
+            const idbTrips = await getTripsFromIDB();
+            localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+          } catch (idbErr) {
+            console.error('상세 에러 (getTripsFromIDB in snapshot):', idbErr);
+            localTrips = getStoredTrips();
+          }
+
           const finalTrips: Trip[] = [];
 
           rawRemoteTrips.forEach((remote) => {
@@ -387,35 +489,52 @@ export function subscribeToTrips(
 
           // Save authoritative state to local storage & IndexedDB
           saveTripsToLocalStorage(finalTrips);
-          saveTripsToIDB(finalTrips).catch(() => {});
+          saveTripsToIDB(finalTrips).catch((err) => {
+            console.error('상세 에러 (saveTripsToIDB snapshot):', err);
+          });
 
           // Immediately update state so all connected devices see the new schedule and souvenirs instantly
           onUpdate(finalTrips);
 
           // Resolve photos in the background and update state once photos are ready
           resolveTripPhotosList(finalTrips).then((resolved) => {
-            saveTripsToIDB(resolved).catch(() => {});
+            saveTripsToIDB(resolved).catch((err) => {
+              console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
+            });
             const hasChanges = JSON.stringify(resolved) !== JSON.stringify(finalTrips);
             if (hasChanges) {
               onUpdate(resolved);
             }
+          }).catch((photoErr) => {
+            console.error('상세 에러 (resolveTripPhotosList):', photoErr);
           });
         }
       },
       (err: any) => {
-        console.error('Firestore trips subscription error:', err);
+        console.error('상세 에러 (Firestore trips subscription onSnapshot error):', err);
+        const errMsg = err?.code === 'permission-denied'
+          ? 'Firebase Firestore 접근 권한이 거부되었습니다 (Permission Denied).'
+          : '클라우드 실시간 동기화 오류가 발생했습니다.';
+        notifyFirestoreError(errMsg, err);
+
         getTripsFromIDB().then((idbTrips) => {
           const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
           onUpdate(fallback);
+        }).catch((fallbackErr) => {
+          console.error('상세 에러 (getTripsFromIDB fallback on error):', fallbackErr);
         });
+
         if (onError) onError(err);
       }
     );
   } catch (err: any) {
-    console.error('Firestore trips connection error:', err);
+    console.error('상세 에러 (Firestore trips connection catch):', err);
+    notifyFirestoreError('클라우드 DB 연결에 실패했습니다.', err);
     getTripsFromIDB().then((idbTrips) => {
       const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
       onUpdate(fallback);
+    }).catch((fallbackErr) => {
+      console.error('상세 에러 (getTripsFromIDB catch fallback):', fallbackErr);
     });
   }
 
@@ -424,7 +543,9 @@ export function subscribeToTrips(
       try {
         unsubscribe();
         unsubscribe = null;
-      } catch {}
+      } catch (unsubErr) {
+        console.error('상세 에러 (unsubscribe trips):', unsubErr);
+      }
     }
   };
 }
@@ -435,12 +556,14 @@ async function resolveTripPhotosList(tripsList: Trip[]): Promise<Trip[]> {
       tripsList.map(async (trip) => {
         try {
           return await resolveTripPhotos(trip);
-        } catch {
+        } catch (err) {
+          console.error('상세 에러 (resolveTripPhotos item):', err);
           return trip;
         }
       })
     );
-  } catch {
+  } catch (err) {
+    console.error('상세 에러 (resolveTripPhotosList Promise.all):', err);
     return tripsList;
   }
 }
@@ -481,17 +604,24 @@ export function subscribeToBrandSettings(
             if (settings.adminPassword) {
               localStorage.setItem('jplanner_site_password', settings.adminPassword);
             }
-          } catch (e) {}
+          } catch (storageErr) {
+            console.error('상세 에러 (localStorage brand setItem):', storageErr);
+          }
           onUpdate(settings);
         }
       },
       (err: any) => {
-        console.error('Brand settings subscription error:', err);
+        console.error('상세 에러 (Brand settings subscription error):', err);
+        const errMsg = err?.code === 'permission-denied'
+          ? 'Firebase 브랜드 설정 권한이 거부되었습니다.'
+          : '브랜드 설정 실시간 동기화 오류';
+        notifyFirestoreError(errMsg, err);
         onUpdate(getStoredBrandSettings());
       }
     );
   } catch (err) {
-    console.error('Brand settings connection error:', err);
+    console.error('상세 에러 (Brand settings connection catch):', err);
+    notifyFirestoreError('브랜드 설정 DB 연결 실패', err);
     onUpdate(getStoredBrandSettings());
   }
 
@@ -499,7 +629,9 @@ export function subscribeToBrandSettings(
     if (unsubscribe) {
       try {
         unsubscribe();
-      } catch {}
+      } catch (unsubErr) {
+        console.error('상세 에러 (unsubscribe brand):', unsubErr);
+      }
     }
   };
 }
@@ -515,13 +647,14 @@ export async function saveBrandSettingsToFirestore(settings: {
   adminPassword?: string;
   tripOrder?: string[];
 }) {
+  updateSyncStatus('saving', '설정 저장 중...');
   try {
     localStorage.setItem(STORAGE_BRAND_KEY, JSON.stringify(settings));
     if (settings.adminPassword) {
       localStorage.setItem('jplanner_site_password', settings.adminPassword);
     }
   } catch (err) {
-    console.warn('Brand local cache warning:', err);
+    console.error('상세 에러 (Brand local cache setItem):', err);
   }
 
   if (pendingBrandTimer) {
@@ -533,8 +666,13 @@ export async function saveBrandSettingsToFirestore(settings: {
     try {
       const safeSettings = removeUndefinedDeep(settings);
       await setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
+      updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
-      console.error('Failed to save brand settings to Firestore:', err);
+      console.error('상세 에러 (saveBrandSettingsToFirestore setDoc):', err);
+      const errMsg = err?.code === 'permission-denied'
+        ? 'Firebase 브랜드 설정 저장 권한이 거부되었습니다.'
+        : '브랜드 설정을 클라우드에 저장하지 못했습니다.';
+      notifyFirestoreError(errMsg, err);
     }
   }, 300);
 }

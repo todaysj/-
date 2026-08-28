@@ -62,6 +62,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
   const [souvenirTabs, setSouvenirTabs] = useState<SouvenirTabConfig[]>(() => getTripSouvenirTabs(trip));
 
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Add new Checklist Tab
@@ -128,29 +129,35 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim() || !destination.trim()) return;
+    if (!title.trim() || !destination.trim() || isSaving) return;
 
-    const updated: Trip = {
-      ...trip,
-      title: title.trim(),
-      destination: destination.trim(),
-      startDate,
-      endDate,
-      totalBudget: Number(totalBudget) || 0,
-      coverImage: coverImage.trim() || 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1200&q=80',
-      checklistTabs,
-      souvenirTabs,
-      // Backward compatibility sync
-      packingList: checklistTabs[0]?.items || [],
-      checklistTitle: checklistTabs[0]?.title || '',
-      checklistSubtitle: checklistTabs[0]?.subtitle || '',
-      packingCategories: checklistTabs[0]?.categories || DEFAULT_PACKING_CATEGORIES,
-      souvenirs: souvenirTabs[0]?.items || [],
-      souvenirTags: souvenirTabs[0]?.tags || DEFAULT_SOUVENIR_TAGS
-    };
+    setIsSaving(true);
+    try {
+      const updated: Trip = {
+        ...trip,
+        title: title.trim(),
+        destination: destination.trim(),
+        startDate,
+        endDate,
+        totalBudget: Number(totalBudget) || 0,
+        coverImage: coverImage.trim() || 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1200&q=80',
+        checklistTabs,
+        souvenirTabs,
+        // Backward compatibility sync
+        packingList: checklistTabs[0]?.items || [],
+        checklistTitle: checklistTabs[0]?.title || '',
+        checklistSubtitle: checklistTabs[0]?.subtitle || '',
+        packingCategories: checklistTabs[0]?.categories || DEFAULT_PACKING_CATEGORIES,
+        souvenirs: souvenirTabs[0]?.items || [],
+        souvenirTags: souvenirTabs[0]?.tags || DEFAULT_SOUVENIR_TAGS
+      };
 
-    onSave(updated);
-    onClose();
+      onSave(updated);
+      onClose();
+    } catch (err) {
+      console.error('상세 에러 (EditTripModal handleSubmit):', err);
+      setIsSaving(false);
+    }
   };
 
   const handleDelete = () => {
@@ -549,9 +556,10 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl shadow-md transition"
+                  disabled={isSaving}
+                  className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer"
                 >
-                  수정 저장
+                  <span>{isSaving ? '저장 중...' : '수정 저장'}</span>
                 </button>
               </div>
             </div>

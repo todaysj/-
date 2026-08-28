@@ -17,7 +17,7 @@ import { ExportModal } from './components/ExportModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
-import { CheckCircle2, WifiOff } from 'lucide-react';
+import { CheckCircle2, WifiOff, AlertTriangle, X } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
 import {
   subscribeToTrips,
@@ -27,7 +27,10 @@ import {
   saveBrandSettingsToFirestore,
   getStoredTrips,
   getStoredBrandSettings,
-  saveTripsToLocalStorage
+  saveTripsToLocalStorage,
+  subscribeToSyncStatus,
+  subscribeToFirestoreErrors,
+  SyncStatus
 } from './lib/tripService';
 import { getAllLocalPhotos, savePhotoToCloud } from './utils/photoStore';
 import { resolveTripPhotos } from './utils/imageUtils';
@@ -86,7 +89,39 @@ export default function App() {
   });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [errorToast, setErrorToast] = useState<{ message: string; timestamp: number } | null>(null);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>('connecting');
+  const [syncMessage, setSyncMessage] = useState<string>('DB 연결 대기 중...');
   const [isOffline, setIsOffline] = useState<boolean>(() => !navigator.onLine);
+
+  // Subscribe to DB Sync Status & Silent Error Monitor
+  useEffect(() => {
+    const unsubStatus = subscribeToSyncStatus((info) => {
+      setSyncStatus(info.status);
+      if (info.message) setSyncMessage(info.message);
+    });
+
+    const unsubError = subscribeToFirestoreErrors((errorMsg) => {
+      setErrorToast({
+        message: errorMsg,
+        timestamp: Date.now()
+      });
+    });
+
+    return () => {
+      unsubStatus();
+      unsubError();
+    };
+  }, []);
+
+  // 3-second Auto-Dismiss for Red Error Toast
+  useEffect(() => {
+    if (!errorToast) return;
+    const timer = setTimeout(() => {
+      setErrorToast(null);
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [errorToast]);
 
   // Clean URL bar from old query params if any
   useEffect(() => {
@@ -95,7 +130,9 @@ export default function App() {
         const cleanUrl = window.location.pathname;
         window.history.replaceState({}, '', cleanUrl);
       }
-    } catch {}
+    } catch (err) {
+      console.error('상세 에러 (URL cleanup):', err);
+    }
   }, []);
 
   useEffect(() => {
@@ -750,6 +787,8 @@ export default function App() {
         onOpenBrandModal={handleRequestAdminModal}
         onOpenExportModal={() => setIsExportModalOpen(true)}
         onLockSite={() => setIsSiteUnlocked(false)}
+        syncStatus={syncStatus}
+        syncMessage={syncMessage}
       />
 
       {/* Offline Status Alert Banner */}
@@ -907,13 +946,32 @@ export default function App() {
         }
       />
 
-      {/* Floating Toast Notification */}
+      {/* Floating Toast Notification (Success) */}
       {toastMessage && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2.5 px-5 py-3 bg-slate-900 text-white text-xs sm:text-sm font-bold rounded-2xl shadow-2xl border border-slate-700/80 animate-fade-in pointer-events-none">
           <div className="p-1 bg-emerald-500/20 text-emerald-400 rounded-lg shrink-0">
             <CheckCircle2 className="w-4 h-4" />
           </div>
           <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Top-Right Red Error Toast Notification (3s auto-dismiss) */}
+      {errorToast && (
+        <div className="fixed top-5 right-5 z-[100] max-w-sm sm:max-w-md bg-rose-600 text-white px-4 py-3.5 rounded-2xl shadow-2xl border border-rose-400 flex items-start space-x-3 animate-in fade-in slide-in-from-top-4 duration-200">
+          <div className="p-1.5 bg-white/20 rounded-xl shrink-0 mt-0.5">
+            <AlertTriangle className="w-5 h-5 text-white" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="font-bold text-sm text-white">클라우드 동기화 알림</div>
+            <div className="text-xs text-rose-100 mt-0.5 leading-relaxed break-words font-medium">{errorToast.message}</div>
+          </div>
+          <button
+            onClick={() => setErrorToast(null)}
+            className="p-1 hover:bg-white/20 rounded-lg transition shrink-0 text-white/80 hover:text-white cursor-pointer"
+          >
+            <X className="w-4 h-4" />
+          </button>
         </div>
       )}
     </div>

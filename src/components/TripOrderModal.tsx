@@ -28,6 +28,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
   const [orderedTrips, setOrderedTrips] = useState<Trip[]>([...trips]);
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleMoveUp = (index: number) => {
     if (index <= 0) return;
@@ -92,8 +93,15 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
   };
 
   const handleSave = () => {
-    onSaveTripOrder(orderedTrips);
-    onClose();
+    if (isSaving) return;
+    setIsSaving(true);
+    try {
+      onSaveTripOrder(orderedTrips);
+      onClose();
+    } catch (err) {
+      console.error('상세 에러 (TripOrderModal handleSave):', err);
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -289,10 +297,11 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
             <button
               type="button"
               onClick={handleSave}
-              className="inline-flex items-center space-x-1.5 px-5 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-xl transition shadow-sm active:scale-95"
+              disabled={isSaving}
+              className="inline-flex items-center space-x-1.5 px-5 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-50 rounded-xl transition shadow-sm active:scale-95 cursor-pointer"
             >
               <Check className="w-4 h-4" />
-              <span>순서 저장하기</span>
+              <span>{isSaving ? '저장 중...' : '순서 저장하기'}</span>
             </button>
           </div>
         </div>

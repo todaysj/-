@@ -41,6 +41,7 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   // Google Maps Search Modal State
   const [isPlaceSearchOpen, setIsPlaceSearchOpen] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
 
   const handlePlaceSelect = (place: { name: string; address: string; lat: number; lng: number; category?: string }) => {
     setLocation(place.name);
@@ -70,26 +71,31 @@ export const EventModal: React.FC<EventModalProps> = ({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() || isSaving) return;
 
-    onSave({
-      id: editingItem ? editingItem.id : `evt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      day: selectedDay,
-      time,
-      endTime: endTime.trim() ? endTime.trim() : undefined,
-      title: title.trim(),
-      category,
-      location: location.trim(),
-      lat: lat && !isNaN(lat) ? lat : undefined,
-      lng: lng && !isNaN(lng) ? lng : undefined,
-      cost: numCost,
-      currency,
-      notes: notes.trim(),
-      bookingRef: bookingRef.trim(),
-      isDone: editingItem ? editingItem.isDone : false
-    });
-
-    onClose();
+    setIsSaving(true);
+    try {
+      onSave({
+        id: editingItem ? editingItem.id : `evt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        day: selectedDay,
+        time,
+        endTime: endTime.trim() ? endTime.trim() : undefined,
+        title: title.trim(),
+        category,
+        location: location.trim(),
+        lat: lat && !isNaN(lat) ? lat : undefined,
+        lng: lng && !isNaN(lng) ? lng : undefined,
+        cost: numCost,
+        currency,
+        notes: notes.trim(),
+        bookingRef: bookingRef.trim(),
+        isDone: editingItem ? editingItem.isDone : false
+      });
+      onClose();
+    } catch (err) {
+      console.error('상세 에러 (EventModal handleSubmit):', err);
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -357,9 +363,10 @@ export const EventModal: React.FC<EventModalProps> = ({
               </button>
               <button
                 type="submit"
-                className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 text-white font-bold text-xs rounded-xl shadow-md transition"
+                disabled={isSaving}
+                className="px-5 py-2.5 bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-md transition flex items-center gap-1.5 cursor-pointer"
               >
-                일정 저장
+                <span>{isSaving ? '저장 중...' : '일정 저장'}</span>
               </button>
             </div>
           </form>
