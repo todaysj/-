@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Trip, ScheduleItem } from '../types';
 import L from 'leaflet';
 import { MapPin, Navigation, ExternalLink } from 'lucide-react';
+import { getGoogleMapsUrl } from '../utils/placeSearch';
 
 interface MapViewProps {
   trip: Trip;
@@ -12,9 +13,14 @@ export const MapView: React.FC<MapViewProps> = ({ trip }) => {
   const mapInstanceRef = useRef<L.Map | null>(null);
   const [selectedDay, setSelectedDay] = useState<number>(0); // 0 = all
 
-  // Items that have lat & lng
+  // Items that have lat & lng for Leaflet rendering
   const itemsWithCoords = trip.schedule.filter(
     (item) => (selectedDay === 0 || item.day === selectedDay) && item.lat && item.lng
+  );
+
+  // All items with a location name for list display
+  const itemsWithLocation = trip.schedule.filter(
+    (item) => (selectedDay === 0 || item.day === selectedDay) && item.location && item.location.trim().length > 0
   );
 
   useEffect(() => {
@@ -182,29 +188,40 @@ export const MapView: React.FC<MapViewProps> = ({ trip }) => {
           {selectedDay === 0 ? '전체 방문 장소 목록' : `Day ${selectedDay} 방문 장소 목록`}
         </h3>
 
-        {itemsWithCoords.length === 0 ? (
+        {itemsWithLocation.length === 0 ? (
           <p className="text-xs text-slate-400 py-4 text-center">
-            해당 일차에 등록된 위치 좌표 정보가 없습니다.
+            해당 일차에 등록된 장소 정보가 없습니다.
           </p>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 sm:gap-3">
-            {itemsWithCoords.map((item, idx) => (
+            {itemsWithLocation.map((item, idx) => (
               <div
                 key={item.id}
-                className="p-3 bg-slate-50 border border-slate-200 rounded-xl hover:border-sky-300 transition flex items-start space-x-3"
+                className="p-3 bg-slate-50 border border-slate-200 rounded-xl hover:border-sky-300 transition flex items-start space-x-3 group"
               >
                 <span className="w-6 h-6 rounded-full bg-slate-900 text-white text-xs font-extrabold flex items-center justify-center shrink-0 mt-0.5 shadow-xs">
                   {idx + 1}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[11px] font-bold text-sky-600">
-                    DAY {item.day} • {item.time}
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-sky-600">
+                      DAY {item.day} • {item.time}
+                    </span>
+                    <a
+                      href={getGoogleMapsUrl(item.location, item.lat, item.lng)}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="text-[10px] text-sky-600 hover:text-sky-800 font-bold inline-flex items-center gap-0.5 hover:underline"
+                    >
+                      <span>Google 지도</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
+                    </a>
                   </div>
                   <div className="font-bold text-slate-800 text-xs truncate">
                     {item.title}
                   </div>
                   <div className="text-[11px] text-slate-500 truncate mt-0.5">
-                    {item.location}
+                    📍 {item.location}
                   </div>
                 </div>
               </div>

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Trip, ScheduleItem, CategoryType } from '../types';
 import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy } from 'lucide-react';
 import { AsyncImage } from './AsyncImage';
+import { getGoogleMapsUrl } from '../utils/placeSearch';
 
 interface ItineraryViewProps {
   trip: Trip;
@@ -354,7 +355,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                       </span>
 
                       <a
-                        href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(item.location)}`}
+                        href={getGoogleMapsUrl(item.location, item.lat, item.lng)}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center text-sky-600 hover:text-sky-800 font-semibold text-[11px] hover:underline shrink-0"

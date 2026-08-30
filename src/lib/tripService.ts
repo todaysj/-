@@ -1,4 +1,4 @@
-import { collection, doc, onSnapshot, setDoc, deleteDoc } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, disableNetwork } from 'firebase/firestore';
 import { db } from './firebase';
 import { Trip, TabType, SouvenirTabConfig, ChecklistTabConfig, ScheduleItem, Reservation, ExpenseItem, PackingItem } from '../types';
 import { INITIAL_TRIPS } from '../data/mockData';
@@ -10,7 +10,7 @@ const TRIPS_COLLECTION = 'trips';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
 const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
 
-export type SyncStatus = 'connecting' | 'synced' | 'saving' | 'error';
+export type SyncStatus = 'connecting' | 'synced' | 'saving' | 'error' | 'local-saved';
 
 export interface SyncStatusInfo {
   status: SyncStatus;
@@ -27,6 +27,66 @@ let currentSyncStatus: SyncStatusInfo = {
   message: 'DB 연결 중...',
   timestamp: Date.now()
 };
+
+const QUOTA_STORAGE_KEY = 'jplanner_quota_exceeded_until';
+
+/**
+ * Check if the Firebase free write quota is temporarily exhausted
+ */
+export function isQuotaExceeded(): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    const val = localStorage.getItem(QUOTA_STORAGE_KEY);
+    if (!val) return false;
+    const until = Number(val);
+    if (isNaN(until) || Date.now() > until) {
+      localStorage.removeItem(QUOTA_STORAGE_KEY);
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mark quota as exhausted and switch seamlessly to resilient Local-First storage mode
+ */
+export function setQuotaExceeded(durationMs = 24 * 60 * 60 * 1000): void {
+  try {
+    if (typeof window !== 'undefined') {
+      const until = Date.now() + durationMs;
+      localStorage.setItem(QUOTA_STORAGE_KEY, until.toString());
+    }
+  } catch {}
+  try {
+    disableNetwork(db).catch(() => {});
+  } catch {}
+  updateSyncStatus('local-saved', '로컬 안전 저장 모드 (기기 내 100% 보관)');
+}
+
+// If quota was already exceeded in this browser session, disable network immediately
+if (isQuotaExceeded()) {
+  try {
+    disableNetwork(db).catch(() => {});
+  } catch {}
+}
+
+/**
+ * Detect Firestore quota exhaustion errors
+ */
+export function isQuotaError(err: any): boolean {
+  if (!err) return false;
+  const code = err?.code || '';
+  const message = String(err?.message || err?.toString() || '').toLowerCase();
+  return (
+    code === 'resource-exhausted' ||
+    message.includes('quota') ||
+    message.includes('resource-exhausted') ||
+    message.includes('free daily write units') ||
+    message.includes('quota limit exceeded')
+  );
+}
 
 export function subscribeToSyncStatus(listener: (info: SyncStatusInfo) => void) {
   syncStatusListeners.add(listener);
@@ -59,6 +119,10 @@ export function updateSyncStatus(status: SyncStatus, message?: string) {
 }
 
 export function notifyFirestoreError(userFriendlyMsg: string, rawError?: any) {
+  if (isQuotaError(rawError)) {
+    setQuotaExceeded();
+    return;
+  }
   console.error('상세 에러 (Firestore):', userFriendlyMsg, rawError);
   updateSyncStatus('error', userFriendlyMsg);
   firestoreErrorListeners.forEach((listener) => {
@@ -70,18 +134,11 @@ export function notifyFirestoreError(userFriendlyMsg: string, rawError?: any) {
   });
 }
 
-// Clear any stale local quota limits
-try {
-  if (typeof window !== 'undefined') {
-    localStorage.removeItem('jplanner_quota_exceeded_until');
-  }
-} catch (error) {
-  console.error('상세 에러 (localStorage clear):', error);
-}
-
-// Pending trip writes debounce trackers
+// Pending trip writes debounce trackers & payload deduplication cache
 const pendingTripWrites = new Map<string, ReturnType<typeof setTimeout>>();
+const lastWrittenTripHash = new Map<string, string>();
 let pendingBrandTimer: ReturnType<typeof setTimeout> | null = null;
+let lastWrittenBrandHash = '';
 
 export function removeUndefinedDeep<T>(obj: T): T {
   if (obj === null || obj === undefined) {
@@ -120,6 +177,55 @@ export function sanitizeForFirestore<T>(data: T): T {
 }
 
 /**
+ * Helper to strip bulky base64 data URLs before storing in localStorage (5MB quota safety)
+ * Images are safely stored and loaded via IndexedDB (photoStore / AsyncImage)
+ */
+export function stripLargePayloadsForStorage(obj: any): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') {
+    if (obj.startsWith('data:image/') || (obj.startsWith('data:') && obj.length > 500)) {
+      return '';
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(stripLargePayloadsForStorage);
+  }
+  if (typeof obj === 'object') {
+    const res: Record<string, any> = {};
+    for (const k of Object.keys(obj)) {
+      res[k] = stripLargePayloadsForStorage(obj[k]);
+    }
+    return res;
+  }
+  return obj;
+}
+
+/**
+ * Safe wrapper for localStorage.setItem with automatic quota exceeded recovery
+ */
+export function safeLocalStorageSet(key: string, value: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (err: any) {
+    // If quota exceeded, attempt cleanup of bulky non-essential keys
+    try {
+      if (key !== STORAGE_TRIPS_KEY) {
+        // Free space by clearing the heavy trips cache in localStorage
+        localStorage.removeItem(STORAGE_TRIPS_KEY);
+      }
+      localStorage.setItem(key, value);
+      return true;
+    } catch {
+      // If still failing, gracefully skip localStorage write (IndexedDB handles full persistence)
+      return false;
+    }
+  }
+}
+
+/**
  * Load cached trips from browser localStorage (or fallback to INITIAL_TRIPS)
  */
 export function getStoredTrips(): Trip[] {
@@ -132,19 +238,34 @@ export function getStoredTrips(): Trip[] {
       }
     }
   } catch (error) {
-    console.error('상세 에러 (getStoredTrips):', error);
+    // Graceful fallback
   }
   return INITIAL_TRIPS;
 }
 
 /**
- * Save trips list to browser localStorage cache
+ * Save trips list to browser localStorage cache safely without exceeding the 5MB browser quota
  */
 export function saveTripsToLocalStorage(trips: Trip[]): void {
+  if (!trips || !Array.isArray(trips)) return;
   try {
-    localStorage.setItem(STORAGE_TRIPS_KEY, JSON.stringify(trips));
-  } catch (error) {
-    console.error('상세 에러 (saveTripsToLocalStorage):', error);
+    const lightweightTrips = stripLargePayloadsForStorage(trips);
+    const success = safeLocalStorageSet(STORAGE_TRIPS_KEY, JSON.stringify(lightweightTrips));
+    if (!success) {
+      // If full lightweight trips fail, try minimal overview list
+      const minimalTrips = trips.map((t) => ({
+        id: t.id,
+        title: t.title,
+        destination: t.destination,
+        startDate: t.startDate,
+        endDate: t.endDate,
+        currency: t.currency,
+        updatedAt: t.updatedAt || Date.now()
+      }));
+      safeLocalStorageSet(STORAGE_TRIPS_KEY, JSON.stringify(minimalTrips));
+    }
+  } catch {
+    // IndexedDB (IDB) already has full trip backups and full trip data safely stored
   }
 }
 
@@ -312,8 +433,6 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     updatedAt: Date.now()
   };
 
-  updateSyncStatus('saving', '데이터 저장 중...');
-
   // 1. Immediately create a safety backup in IndexedDB
   saveTripBackup(timestampedTrip).catch((err) => {
     console.error('상세 에러 (saveTripBackup):', err);
@@ -334,17 +453,24 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     console.error('상세 에러 (saveTripToFirestore local cache):', err);
   }
 
+  // If daily Firestore quota is exhausted, protect user experience with instant local-first storage
+  if (isQuotaExceeded()) {
+    updateSyncStatus('local-saved', '로컬 안전 저장 완료 (기기 내 100% 보관)');
+    return;
+  }
+
+  updateSyncStatus('saving', '데이터 저장 중...');
+
   // 3. Prepare clean trip: upload photos to Firestore `/photos/{photoId}` and replace with `photo://${photoId}`
   let cleanTrip: Trip;
   try {
     const detached = await detachTripPhotos(timestampedTrip);
     cleanTrip = sanitizeForFirestore(detached);
   } catch (e) {
-    console.error('상세 에러 (detachTripPhotos):', e);
     cleanTrip = sanitizeForFirestore(timestampedTrip);
   }
 
-  // 4. Quick debounce and write directly to Firestore `/trips/{cleanTrip.id}`
+  // 4. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
@@ -352,25 +478,34 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
 
   const timer = setTimeout(async () => {
     pendingTripWrites.delete(cleanTrip.id);
+    if (isQuotaExceeded()) {
+      updateSyncStatus('local-saved', '로컬 안전 저장 완료');
+      return;
+    }
+
     const safePayload = sanitizeForFirestore(cleanTrip);
+    const payloadHash = JSON.stringify(safePayload);
+    if (lastWrittenTripHash.get(cleanTrip.id) === payloadHash) {
+      updateSyncStatus('synced', '실시간 동기화됨');
+      return;
+    }
+
     try {
       await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
-      console.error('상세 에러 (Firestore setDoc retry):', err);
-      try {
-        const fallbackTrip = sanitizeForFirestore(safePayload);
-        await setDoc(doc(db, TRIPS_COLLECTION, fallbackTrip.id), fallbackTrip, { merge: true });
-        updateSyncStatus('synced', '실시간 동기화됨');
-      } catch (finalErr: any) {
-        console.error('상세 에러 (Firestore setDoc final):', finalErr);
-        const errMsg = finalErr?.code === 'permission-denied'
-          ? 'Firebase 데이터 저장 권한이 거부되었습니다 (Permission Denied).'
-          : '클라우드 데이터 저장에 실패했습니다. 네트워크를 확인해주세요.';
-        notifyFirestoreError(errMsg, finalErr);
+      if (isQuotaError(err)) {
+        setQuotaExceeded();
+        return;
       }
+      console.error('상세 에러 (Firestore setDoc):', err);
+      const errMsg = err?.code === 'permission-denied'
+        ? 'Firebase 데이터 저장 권한이 거부되었습니다 (Permission Denied).'
+        : '클라우드 데이터 저장에 실패했습니다. 네트워크를 확인해주세요.';
+      notifyFirestoreError(errMsg, err);
     }
-  }, 40);
+  }, 400);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
@@ -384,8 +519,7 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     clearTimeout(existingTimer);
     pendingTripWrites.delete(tripId);
   }
-
-  updateSyncStatus('saving', '여행 삭제 중...');
+  lastWrittenTripHash.delete(tripId);
 
   // 1. Immediately update browser cache and IndexedDB
   try {
@@ -399,11 +533,22 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     console.error('상세 에러 (deleteTrip local cache):', err);
   }
 
+  if (isQuotaExceeded()) {
+    updateSyncStatus('local-saved', '여행이 로컬에서 삭제되었습니다.');
+    return;
+  }
+
+  updateSyncStatus('saving', '여행 삭제 중...');
+
   // 2. Delete from Firestore
   try {
     await deleteDoc(doc(db, TRIPS_COLLECTION, tripId));
     updateSyncStatus('synced', '실시간 동기화됨');
   } catch (err: any) {
+    if (isQuotaError(err)) {
+      setQuotaExceeded();
+      return;
+    }
     console.error('상세 에러 (deleteDoc from Firestore):', err);
     const errMsg = err?.code === 'permission-denied'
       ? 'Firebase 삭제 권한이 거부되었습니다 (Permission Denied).'
@@ -436,18 +581,22 @@ export function subscribeToTrips(
     unsubscribe = onSnapshot(
       tripsRef,
       async (snapshot) => {
-        updateSyncStatus('synced', '실시간 동기화됨');
+        if (!isQuotaExceeded()) {
+          updateSyncStatus('synced', '실시간 동기화됨');
+        }
         if (snapshot.empty) {
-          // If Firestore is completely empty on first launch, seed once with default trips
+          // If Firestore is completely empty on first launch and quota is not exceeded, seed initial trips
           try {
             const idbTrips = await getTripsFromIDB();
             const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
             onUpdate(initial);
-            if (initial && initial.length > 0) {
+            if (!isQuotaExceeded() && initial && initial.length > 0) {
               for (const trip of initial) {
                 const clean = sanitizeForFirestore(await detachTripPhotos(trip));
                 setDoc(doc(db, TRIPS_COLLECTION, clean.id), clean, { merge: true }).catch((err) => {
-                  console.error('상세 에러 (seed initial trip):', err);
+                  if (isQuotaError(err)) {
+                    setQuotaExceeded();
+                  }
                 });
               }
             }
@@ -465,7 +614,6 @@ export function subscribeToTrips(
             const idbTrips = await getTripsFromIDB();
             localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
           } catch (idbErr) {
-            console.error('상세 에러 (getTripsFromIDB in snapshot):', idbErr);
             localTrips = getStoredTrips();
           }
 
@@ -511,11 +659,15 @@ export function subscribeToTrips(
         }
       },
       (err: any) => {
-        console.error('상세 에러 (Firestore trips subscription onSnapshot error):', err);
-        const errMsg = err?.code === 'permission-denied'
-          ? 'Firebase Firestore 접근 권한이 거부되었습니다 (Permission Denied).'
-          : '클라우드 실시간 동기화 오류가 발생했습니다.';
-        notifyFirestoreError(errMsg, err);
+        if (isQuotaError(err)) {
+          setQuotaExceeded();
+        } else {
+          console.error('상세 에러 (Firestore trips subscription onSnapshot error):', err);
+          const errMsg = err?.code === 'permission-denied'
+            ? 'Firebase Firestore 접근 권한이 거부되었습니다 (Permission Denied).'
+            : '클라우드 실시간 동기화 오류가 발생했습니다.';
+          notifyFirestoreError(errMsg, err);
+        }
 
         getTripsFromIDB().then((idbTrips) => {
           const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
@@ -524,12 +676,16 @@ export function subscribeToTrips(
           console.error('상세 에러 (getTripsFromIDB fallback on error):', fallbackErr);
         });
 
-        if (onError) onError(err);
+        if (onError && !isQuotaError(err)) onError(err);
       }
     );
   } catch (err: any) {
-    console.error('상세 에러 (Firestore trips connection catch):', err);
-    notifyFirestoreError('클라우드 DB 연결에 실패했습니다.', err);
+    if (isQuotaError(err)) {
+      setQuotaExceeded();
+    } else {
+      console.error('상세 에러 (Firestore trips connection catch):', err);
+      notifyFirestoreError('클라우드 DB 연결에 실패했습니다.', err);
+    }
     getTripsFromIDB().then((idbTrips) => {
       const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
       onUpdate(fallback);
@@ -599,29 +755,33 @@ export function subscribeToBrandSettings(
             adminPassword: data.adminPassword || '1205',
             tripOrder: data.tripOrder || undefined
           };
-          try {
-            localStorage.setItem(STORAGE_BRAND_KEY, JSON.stringify(settings));
-            if (settings.adminPassword) {
-              localStorage.setItem('jplanner_site_password', settings.adminPassword);
-            }
-          } catch (storageErr) {
-            console.error('상세 에러 (localStorage brand setItem):', storageErr);
+          safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
+          if (settings.adminPassword) {
+            safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
           }
           onUpdate(settings);
         }
       },
       (err: any) => {
-        console.error('상세 에러 (Brand settings subscription error):', err);
-        const errMsg = err?.code === 'permission-denied'
-          ? 'Firebase 브랜드 설정 권한이 거부되었습니다.'
-          : '브랜드 설정 실시간 동기화 오류';
-        notifyFirestoreError(errMsg, err);
+        if (isQuotaError(err)) {
+          setQuotaExceeded();
+        } else {
+          console.error('상세 에러 (Brand settings subscription error):', err);
+          const errMsg = err?.code === 'permission-denied'
+            ? 'Firebase 브랜드 설정 권한이 거부되었습니다.'
+            : '브랜드 설정 실시간 동기화 오류';
+          notifyFirestoreError(errMsg, err);
+        }
         onUpdate(getStoredBrandSettings());
       }
     );
   } catch (err) {
-    console.error('상세 에러 (Brand settings connection catch):', err);
-    notifyFirestoreError('브랜드 설정 DB 연결 실패', err);
+    if (isQuotaError(err)) {
+      setQuotaExceeded();
+    } else {
+      console.error('상세 에러 (Brand settings connection catch):', err);
+      notifyFirestoreError('브랜드 설정 DB 연결 실패', err);
+    }
     onUpdate(getStoredBrandSettings());
   }
 
@@ -647,15 +807,17 @@ export async function saveBrandSettingsToFirestore(settings: {
   adminPassword?: string;
   tripOrder?: string[];
 }) {
-  updateSyncStatus('saving', '설정 저장 중...');
-  try {
-    localStorage.setItem(STORAGE_BRAND_KEY, JSON.stringify(settings));
-    if (settings.adminPassword) {
-      localStorage.setItem('jplanner_site_password', settings.adminPassword);
-    }
-  } catch (err) {
-    console.error('상세 에러 (Brand local cache setItem):', err);
+  safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
+  if (settings.adminPassword) {
+    safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
   }
+
+  if (isQuotaExceeded()) {
+    updateSyncStatus('local-saved', '설정이 로컬에 안전하게 저장되었습니다.');
+    return;
+  }
+
+  updateSyncStatus('saving', '설정 저장 중...');
 
   if (pendingBrandTimer) {
     clearTimeout(pendingBrandTimer);
@@ -663,16 +825,30 @@ export async function saveBrandSettingsToFirestore(settings: {
 
   pendingBrandTimer = setTimeout(async () => {
     pendingBrandTimer = null;
+    if (isQuotaExceeded()) {
+      updateSyncStatus('local-saved', '설정 로컬 저장 완료');
+      return;
+    }
     try {
       const safeSettings = removeUndefinedDeep(settings);
+      const hash = JSON.stringify(safeSettings);
+      if (lastWrittenBrandHash === hash) {
+        updateSyncStatus('synced', '실시간 동기화됨');
+        return;
+      }
       await setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
+      lastWrittenBrandHash = hash;
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
+      if (isQuotaError(err)) {
+        setQuotaExceeded();
+        return;
+      }
       console.error('상세 에러 (saveBrandSettingsToFirestore setDoc):', err);
       const errMsg = err?.code === 'permission-denied'
         ? 'Firebase 브랜드 설정 저장 권한이 거부되었습니다.'
         : '브랜드 설정을 클라우드에 저장하지 못했습니다.';
       notifyFirestoreError(errMsg, err);
     }
-  }, 300);
+  }, 400);
 }

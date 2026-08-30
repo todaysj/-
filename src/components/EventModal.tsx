@@ -1,9 +1,10 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { ScheduleItem, CategoryType } from '../types';
-import { X, Clock, MapPin, Tag, AlignLeft, DollarSign, Search, ExternalLink, Sparkles, Wallet, Coins } from 'lucide-react';
+import { X, Clock, MapPin, Tag, AlignLeft, DollarSign, Search, ExternalLink, Sparkles, Wallet, Coins, Compass, Check } from 'lucide-react';
 import { GooglePlaceSearchModal } from './GooglePlaceSearchModal';
 import { CurrencySelector } from './CurrencySelector';
 import { convertToKRW, getExchangeRate } from '../utils/currencyUtils';
+import { getGoogleMapsUrl, parseGoogleMapsUrlOrCoords, POPULAR_TRAVEL_SPOTS, PlaceSearchResult } from '../utils/placeSearch';
 
 interface EventModalProps {
   day: number;
@@ -42,6 +43,57 @@ export const EventModal: React.FC<EventModalProps> = ({
   // Google Maps Search Modal State
   const [isPlaceSearchOpen, setIsPlaceSearchOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [showSuggestions, setShowSuggestions] = useState(false);
+
+  // Fast inline suggestions based on typed text
+  const suggestions = useMemo(() => {
+    const trimmed = location.trim().toLowerCase().replace(/\s+/g, '');
+    if (!trimmed || trimmed.length < 2) return [];
+
+    const matches: Array<{ name: string; address: string; lat: number; lng: number; category: any }> = [];
+    for (const spot of POPULAR_TRAVEL_SPOTS) {
+      const matchName = spot.name.toLowerCase().replace(/\s+/g, '').includes(trimmed);
+      const matchAlias = spot.aliases.some(
+        (a) => a.toLowerCase().replace(/\s+/g, '').includes(trimmed) || trimmed.includes(a.toLowerCase().replace(/\s+/g, ''))
+      );
+      if (matchName || matchAlias) {
+        matches.push(spot);
+        if (matches.length >= 4) break;
+      }
+    }
+    return matches;
+  }, [location]);
+
+  const handleLocationChange = (val: string) => {
+    setLocation(val);
+    setShowSuggestions(true);
+
+    // Auto-detect pasted Google Maps link or raw coordinates
+    const parsed = parseGoogleMapsUrlOrCoords(val);
+    if (parsed) {
+      if (parsed.name) {
+        setLocation(parsed.name);
+      }
+      setLat(parsed.lat);
+      setLng(parsed.lng);
+    } else if (!val.trim()) {
+      setLat(undefined);
+      setLng(undefined);
+    }
+  };
+
+  const handleSelectSuggestion = (s: { name: string; address: string; lat: number; lng: number; category: any }) => {
+    setLocation(s.name);
+    setLat(s.lat);
+    setLng(s.lng);
+    setShowSuggestions(false);
+    if (!title.trim()) {
+      setTitle(s.name);
+    }
+    if (s.category && ['SIGHTSEEING', 'FOOD', 'ACCOMMODATION', 'SHOPPING', 'TRANSPORT', 'OTHER'].includes(s.category)) {
+      setCategory(s.category as CategoryType);
+    }
+  };
 
   const handlePlaceSelect = (place: { name: string; address: string; lat: number; lng: number; category?: string }) => {
     setLocation(place.name);
@@ -63,7 +115,9 @@ export const EventModal: React.FC<EventModalProps> = ({
     setLocation('');
     setLat(undefined);
     setLng(undefined);
+    setShowSuggestions(false);
   };
+
 
   const numCost = Number(cost) || 0;
   const liveConvertedKRW = convertToKRW(numCost, currency, customExchangeRates);
@@ -184,89 +238,114 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
             </div>
 
-            {/* Location Section with Google Maps Search Integration */}
+            {/* Location Section with Google Maps Direct Integration */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between">
                 <label className="block text-xs font-bold text-slate-700">
-                  장소 / 주소 <span className="text-slate-400 font-normal">(선택)</span>
+                  장소 / 위치 <span className="text-slate-400 font-normal">(상호, 주소, 또는 지도 링크)</span>
                 </label>
-                <button
-                  type="button"
-                  onClick={() => setIsPlaceSearchOpen(true)}
-                  className="inline-flex items-center space-x-1 text-[11px] font-bold text-sky-600 hover:text-sky-700 bg-sky-50 hover:bg-sky-100 px-2.5 py-1 rounded-lg transition border border-sky-200/80 cursor-pointer"
-                >
-                  <Search className="w-3 h-3 text-sky-500" />
-                  <span>구글지도 검색</span>
-                </button>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsPlaceSearchOpen(true)}
+                    className="inline-flex items-center space-x-1 text-[11px] font-bold text-sky-600 hover:text-sky-700 bg-sky-50 hover:bg-sky-100 px-2 py-0.5 rounded-lg transition border border-sky-200 cursor-pointer"
+                  >
+                    <Search className="w-3 h-3 text-sky-500" />
+                    <span>지도 핀 검색</span>
+                  </button>
+                </div>
               </div>
 
               <div className="relative">
                 <input
                   type="text"
-                  placeholder="예: 시부야 스카이 (입력하지 않아도 일정 저장이 가능합니다)"
+                  placeholder="예: 삼성궁1분 자연산장, 시부야 스카이, 호텔명 (직접 타이핑 가능)"
                   value={location}
-                  onChange={(e) => {
-                    setLocation(e.target.value);
-                    if (!e.target.value) {
-                      setLat(undefined);
-                      setLng(undefined);
-                    }
-                  }}
-                  className="w-full pl-3.5 pr-20 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium text-slate-800 focus:ring-2 focus:ring-sky-500 outline-none"
+                  onChange={(e) => handleLocationChange(e.target.value)}
+                  onFocus={() => setShowSuggestions(true)}
+                  className="w-full pl-3.5 pr-20 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:ring-2 focus:ring-sky-500 focus:bg-white outline-none transition shadow-xs"
                 />
 
                 {location ? (
-                  <button
-                    type="button"
-                    onClick={handleClearLocation}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1 rounded-md transition"
-                    title="장소 지우기"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
+                  <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={handleClearLocation}
+                      className="text-slate-400 hover:text-slate-600 p-1 rounded-md transition cursor-pointer"
+                      title="장소 지우기"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
                 ) : (
-                  <button
-                    type="button"
-                    onClick={() => setIsPlaceSearchOpen(true)}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 px-2 py-1 bg-white hover:bg-slate-100 text-slate-500 border border-slate-200 rounded-lg text-[10px] font-bold transition flex items-center gap-1"
-                  >
-                    <MapPin className="w-3 h-3 text-sky-500" />
-                    검색
-                  </button>
+                  <div className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none text-[11px]">
+                    📍
+                  </div>
+                )}
+
+                {/* Inline Fast Suggestions Dropdown */}
+                {showSuggestions && suggestions.length > 0 && (
+                  <div className="absolute z-20 top-full mt-1 left-0 right-0 bg-white border border-slate-200 rounded-xl shadow-lg overflow-hidden animate-in fade-in zoom-in-95 duration-100 divide-y divide-slate-100">
+                    <div className="px-3 py-1.5 bg-slate-50 text-[10px] font-bold text-slate-500 flex items-center justify-between">
+                      <span>추천 명소 자동완성</span>
+                      <button
+                        type="button"
+                        onClick={() => setShowSuggestions(false)}
+                        className="text-slate-400 hover:text-slate-600 cursor-pointer"
+                      >
+                        닫기
+                      </button>
+                    </div>
+                    {suggestions.map((s, idx) => (
+                      <div
+                        key={idx}
+                        onClick={() => handleSelectSuggestion(s)}
+                        className="px-3 py-2 hover:bg-sky-50 cursor-pointer transition flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-bold text-xs text-slate-800 truncate">{s.name}</div>
+                          <div className="text-[10px] text-slate-400 truncate">{s.address}</div>
+                        </div>
+                        <span className="text-[10px] font-bold text-sky-600 bg-sky-100 px-1.5 py-0.5 rounded shrink-0">
+                          선택
+                        </span>
+                      </div>
+                    ))}
+                  </div>
                 )}
               </div>
 
-              {/* Coordinates Connected Badge */}
-              {lat !== undefined && lng !== undefined && (
-                <div className="flex items-center justify-between px-2.5 py-1.5 bg-sky-50/80 border border-sky-200 rounded-lg text-[11px] text-sky-800">
+              {/* Google Maps Real-time Auto-link Banner */}
+              {location.trim() ? (
+                <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-50/90 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 shadow-2xs">
                   <div className="flex items-center space-x-1.5 truncate">
-                    <MapPin className="w-3.5 h-3.5 text-sky-600 shrink-0" />
-                    <span className="font-semibold truncate">
-                      지도 좌표 연결됨: {lat.toFixed(4)}, {lng.toFixed(4)}
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse" />
+                    <span className="font-bold truncate">
+                      구글 지도 자동 연동됨
                     </span>
+                    {lat !== undefined && lng !== undefined && (
+                      <span className="text-[10px] text-emerald-700 font-mono hidden sm:inline">
+                        ({lat.toFixed(3)}, {lng.toFixed(3)})
+                      </span>
+                    )}
                   </div>
                   <div className="flex items-center space-x-2 shrink-0">
                     <a
-                      href={`https://www.google.com/maps/search/?api=1&query=${lat},${lng}`}
+                      href={getGoogleMapsUrl(location, lat, lng)}
                       target="_blank"
                       rel="noreferrer"
-                      className="text-sky-600 hover:underline flex items-center font-bold text-[10px]"
+                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-white text-emerald-700 border border-emerald-300 hover:bg-emerald-100 font-bold rounded-lg text-[10px] transition cursor-pointer"
+                      title="새 창에서 구글 지도로 이 장소 열기"
                     >
-                      지도 <ExternalLink className="w-2.5 h-2.5 ml-0.5" />
+                      <span>Google 지도 보기</span>
+                      <ExternalLink className="w-2.5 h-2.5" />
                     </a>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLat(undefined);
-                        setLng(undefined);
-                      }}
-                      className="text-slate-400 hover:text-slate-600"
-                      title="좌표 연결 해제"
-                    >
-                      <X className="w-3 h-3" />
-                    </button>
                   </div>
                 </div>
+              ) : (
+                <p className="text-[11px] text-slate-400 px-1">
+                  💡 직접 식당/명소 이름을 적으시면 일정에서 클릭 시 <strong>구글 지도 검색</strong>으로 바로 연결됩니다.
+                </p>
               )}
             </div>
 

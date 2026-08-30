@@ -85,6 +85,16 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span>연결 오류</span>
           </div>
         );
+      case 'local-saved':
+        return (
+          <div
+            className="inline-flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] font-bold bg-teal-500/20 text-teal-300 border border-teal-500/30 transition shadow-xs shrink-0"
+            title="기기 내 안전 저장소(IndexedDB)에 100% 정상 저장되었습니다."
+          >
+            <CheckCircle2 className="w-3 h-3 text-teal-400" />
+            <span>로컬 안전 저장됨</span>
+          </div>
+        );
       case 'synced':
       default:
         return (

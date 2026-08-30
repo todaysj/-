@@ -1,5 +1,6 @@
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { isQuotaExceeded, isQuotaError, setQuotaExceeded } from '../lib/tripService';
 
 const DB_NAME = 'JPlanner_Media_DB';
 const DB_VERSION = 1;
@@ -60,20 +61,24 @@ export async function savePhotoLocal(photoId: string, dataUrl: string): Promise<
     // Non-critical local save fallback
   }
 
-  // 2. Direct sync to Firestore collection so all devices, friends' phones, and Netlify load it
-  try {
-    if (dataUrl.startsWith('data:image/') && dataUrl.length < 950000) {
-      await setDoc(
-        doc(db, PHOTOS_COLLECTION, photoId),
-        {
-          dataUrl,
-          updatedAt: Date.now()
-        },
-        { merge: true }
-      );
+  // 2. Direct sync to Firestore collection only if quota is healthy
+  if (!isQuotaExceeded()) {
+    try {
+      if (dataUrl.startsWith('data:image/') && dataUrl.length < 500000) {
+        await setDoc(
+          doc(db, PHOTOS_COLLECTION, photoId),
+          {
+            dataUrl,
+            updatedAt: Date.now()
+          },
+          { merge: true }
+        );
+      }
+    } catch (err: any) {
+      if (isQuotaError(err)) {
+        setQuotaExceeded();
+      }
     }
-  } catch (err) {
-    console.warn('Photo cloud upload notice:', err);
   }
 }
 
