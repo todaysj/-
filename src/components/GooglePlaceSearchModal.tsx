@@ -523,20 +523,18 @@ export const GooglePlaceSearchModal: React.FC<GooglePlaceSearchModalProps> = ({
             <div className="flex items-center justify-between text-xs font-bold text-slate-700">
               <span className="flex items-center gap-1.5">
                 <MousePointerClick className="w-3.5 h-3.5 text-sky-600" />
-                지도 미리보기 & 핀 위치 지정
+                지도 미리보기 & 핀 수동 조정
               </span>
-              <span className="text-[10px] text-sky-600 font-semibold bg-sky-50 px-2 py-0.5 rounded-full">
-                지도 클릭 시 핀 생성
+              <span className="text-[10px] text-emerald-700 font-bold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                클릭 & 드래그 가능
               </span>
             </div>
 
             <div className="relative rounded-xl overflow-hidden border border-slate-200 bg-slate-100 h-48 sm:h-56 w-full shadow-inner">
               <div ref={previewMapRef} className="w-full h-full" />
-              {!selectedPlace && (
-                <div className="absolute top-2 left-2 right-2 bg-slate-900/80 backdrop-blur-xs text-white text-[11px] py-1.5 px-3 rounded-lg shadow-md pointer-events-none flex items-center justify-between">
-                  <span>💡 지도를 클릭하여 원하는 지점에 바로 핀을 꽂을 수 있습니다.</span>
-                </div>
-              )}
+              <div className="absolute top-2 left-2 right-2 bg-slate-900/80 backdrop-blur-xs text-white text-[10px] sm:text-[11px] py-1.5 px-2.5 rounded-lg shadow-md pointer-events-none flex items-center justify-between z-1000">
+                <span>📍 지도를 클릭하거나 핀을 드래그해 위치를 미세 조정하세요.</span>
+              </div>
             </div>
 
             {selectedPlace ? (

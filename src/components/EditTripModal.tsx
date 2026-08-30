@@ -16,6 +16,7 @@ import {
   CheckSquare,
   Gift,
   Plus,
+  Minus,
   Users,
   Layers
 } from 'lucide-react';
@@ -25,6 +26,12 @@ import {
   DEFAULT_PACKING_CATEGORIES,
   DEFAULT_SOUVENIR_TAGS
 } from '../utils/tabUtils';
+import {
+  calculateTripDays,
+  formatTripNightsAndDays,
+  parseLocalDate,
+  formatDateToISO
+} from '../utils/dateUtils';
 
 interface EditTripModalProps {
   trip: Trip;
@@ -106,6 +113,21 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
     setSouvenirTabs(souvenirTabs.filter((t) => t.id !== id));
   };
 
+  // Date adjustment helpers
+  const handleAddDay = () => {
+    const end = parseLocalDate(endDate);
+    end.setDate(end.getDate() + 1);
+    setEndDate(formatDateToISO(end));
+  };
+
+  const handleRemoveDay = () => {
+    const days = calculateTripDays(startDate, endDate);
+    if (days <= 1) return;
+    const end = parseLocalDate(endDate);
+    end.setDate(end.getDate() - 1);
+    setEndDate(formatDateToISO(end));
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -133,12 +155,19 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
 
     setIsSaving(true);
     try {
+      const newTotalDays = calculateTripDays(startDate, endDate);
+      const updatedSchedule = (trip.schedule || []).map((item) => ({
+        ...item,
+        day: Math.max(1, Math.min(item.day, newTotalDays))
+      }));
+
       const updated: Trip = {
         ...trip,
         title: title.trim(),
         destination: destination.trim(),
         startDate,
         endDate,
+        schedule: updatedSchedule,
         totalBudget: Number(totalBudget) || 0,
         coverImage: coverImage.trim() || 'https://images.unsplash.com/photo-1503899036084-c55cdd92da26?auto=format&fit=crop&w=1200&q=80',
         checklistTabs,
@@ -375,6 +404,37 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
                   />
                   <Calendar className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3.5" />
                 </div>
+              </div>
+            </div>
+
+            {/* Travel Date Duration & Quick Adjust */}
+            <div className="bg-sky-50/80 border border-sky-200/80 rounded-xl p-3 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center space-x-2">
+                <Calendar className="w-4 h-4 text-sky-600 shrink-0" />
+                <span className="text-xs font-bold text-sky-900">
+                  {formatTripNightsAndDays(startDate, endDate)} (총 {calculateTripDays(startDate, endDate)}일간)
+                </span>
+              </div>
+              <div className="flex items-center space-x-1.5">
+                <button
+                  type="button"
+                  onClick={handleRemoveDay}
+                  disabled={calculateTripDays(startDate, endDate) <= 1}
+                  className="px-2.5 py-1 bg-white hover:bg-slate-100 disabled:opacity-40 text-slate-700 text-[11px] font-bold rounded-lg border border-slate-200 shadow-2xs transition flex items-center space-x-1 cursor-pointer disabled:cursor-not-allowed"
+                  title="종료일을 하루 줄여 일정을 1일 단축합니다"
+                >
+                  <Minus className="w-3 h-3 text-rose-500" />
+                  <span>-1일 단축</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleAddDay}
+                  className="px-2.5 py-1 bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-bold rounded-lg shadow-2xs transition flex items-center space-x-1 cursor-pointer"
+                  title="종료일을 하루 늘려 일정을 1일 연장합니다"
+                >
+                  <Plus className="w-3 h-3" />
+                  <span>+1일 연장</span>
+                </button>
               </div>
             </div>
 

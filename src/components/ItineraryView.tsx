@@ -1,8 +1,16 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Trip, ScheduleItem, CategoryType } from '../types';
-import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy } from 'lucide-react';
+import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy, Calendar } from 'lucide-react';
 import { AsyncImage } from './AsyncImage';
 import { getGoogleMapsUrl } from '../utils/placeSearch';
+import {
+  getTotalTripDays,
+  formatDayDateShort,
+  formatDayDateDayOnly,
+  formatDayDateKorean,
+  formatDayDateFull,
+  formatTripNightsAndDays
+} from '../utils/dateUtils';
 
 interface ItineraryViewProps {
   trip: Trip;
@@ -32,21 +40,20 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   const [showTripDeleteModal, setShowTripDeleteModal] = useState(false);
   const [scheduleItemToDelete, setScheduleItemToDelete] = useState<ScheduleItem | null>(null);
 
-  // Compute total days from start and end dates
-  const getDaysCount = () => {
-    const start = new Date(trip.startDate);
-    const end = new Date(trip.endDate);
-    const diffTime = Math.abs(end.getTime() - start.getTime());
-    const days = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1;
-    return Math.max(1, days);
-  };
-
-  const totalDays = getDaysCount();
+  // Compute total days using robust dateUtils
+  const totalDays = getTotalTripDays(trip);
   const dayNumbers = Array.from({ length: totalDays }, (_, i) => i + 1);
+
+  // Auto-adjust selectedDay if dates changed
+  useEffect(() => {
+    if (selectedDay > totalDays && totalDays > 0) {
+      setSelectedDay(1);
+    }
+  }, [totalDays, selectedDay]);
 
   // Filter schedules
   const filteredSchedules = trip.schedule.filter((item) => {
-    const matchDay = selectedDay === 0 || item.day === selectedDay;
+    const matchDay = selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay;
     const matchCategory = selectedCategory === 'ALL' || item.category === selectedCategory;
     return matchDay && matchCategory;
   }).sort((a, b) => a.time.localeCompare(b.time));
@@ -71,33 +78,6 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     }
   };
 
-  // Format Date for Day N
-  const getDayDateDayOnly = (dayNum: number) => {
-    if (!trip.startDate) return '';
-    const parts = trip.startDate.split('-');
-    let date: Date;
-    if (parts.length === 3) {
-      date = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-    } else {
-      date = new Date(trip.startDate);
-    }
-    date.setDate(date.getDate() + (dayNum - 1));
-    return `${date.getDate()}일`;
-  };
-
-  const getDayDateString = (dayNum: number) => {
-    if (!trip.startDate) return '';
-    const parts = trip.startDate.split('-');
-    let date: Date;
-    if (parts.length === 3) {
-      date = new Date(parseInt(parts[0], 10), parseInt(parts[1], 10) - 1, parseInt(parts[2], 10));
-    } else {
-      date = new Date(trip.startDate);
-    }
-    date.setDate(date.getDate() + (dayNum - 1));
-    return `${date.getMonth() + 1}월 ${date.getDate()}일 (${['일', '월', '화', '수', '목', '금', '토'][date.getDay()]})`;
-  };
-
   return (
     <div className="space-y-6">
       {/* Trip Header Banner */}
@@ -114,7 +94,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                 📍 {trip.destination}
               </span>
               <span className="px-2.5 sm:px-3 py-1 bg-slate-800/80 text-slate-200 text-[11px] sm:text-xs font-medium rounded-full backdrop-blur-md border border-slate-700">
-                📅 {trip.startDate} ~ {trip.endDate}
+                📅 {trip.startDate} ~ {trip.endDate} ({formatTripNightsAndDays(trip.startDate, trip.endDate)})
               </span>
             </div>
 
@@ -122,7 +102,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               {onDuplicateTrip && (
                 <button
                   onClick={onDuplicateTrip}
-                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-slate-800/90 hover:bg-slate-700/90 text-emerald-300 text-xs font-bold rounded-xl backdrop-blur-md border border-slate-700/80 transition"
+                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-slate-800/90 hover:bg-slate-700/90 text-emerald-300 text-xs font-bold rounded-xl backdrop-blur-md border border-slate-700/80 transition cursor-pointer"
                   title="현재 여행 일정 복사하기"
                 >
                   <Copy className="w-3.5 h-3.5" />
@@ -133,11 +113,11 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               {onOpenEditTripModal && (
                 <button
                   onClick={onOpenEditTripModal}
-                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-slate-800/90 hover:bg-slate-700/90 text-sky-300 text-xs font-bold rounded-xl backdrop-blur-md border border-slate-700/80 transition"
-                  title="여행명, 날짜, 목적지 등 여행 정보 수정"
+                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-slate-800/90 hover:bg-slate-700/90 text-sky-300 text-xs font-bold rounded-xl backdrop-blur-md border border-slate-700/80 transition cursor-pointer"
+                  title="여행명, 날짜(추가/삭제), 목적지 등 여행 정보 수정"
                 >
                   <Edit3 className="w-3.5 h-3.5" />
-                  <span>정보 수정</span>
+                  <span>날짜/정보 수정</span>
                 </button>
               )}
 
@@ -146,7 +126,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                   onClick={() => {
                     onDeleteTrip(trip.id);
                   }}
-                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-rose-900/60 hover:bg-rose-800/80 text-rose-200 text-xs font-bold rounded-xl backdrop-blur-md border border-rose-700/60 transition"
+                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-rose-900/60 hover:bg-rose-800/80 text-rose-200 text-xs font-bold rounded-xl backdrop-blur-md border border-rose-700/60 transition cursor-pointer"
                   title="현재 여행 일정 삭제"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
@@ -157,7 +137,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               {onOpenExportModal && (
                 <button
                   onClick={onOpenExportModal}
-                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl backdrop-blur-md border border-indigo-400/40 shadow-sm transition"
+                  className="inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 bg-indigo-600/90 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl backdrop-blur-md border border-indigo-400/40 shadow-sm transition cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>일정 저장</span>
@@ -196,26 +176,33 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             전체 일정 ({trip.schedule.length})
           </button>
 
-          {dayNumbers.map((dayNum) => (
-            <button
-              key={dayNum}
-              onClick={() => setSelectedDay(dayNum)}
-              className={`px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition whitespace-nowrap flex items-center space-x-1.5 shrink-0 ${
-                selectedDay === dayNum
-                  ? 'bg-sky-600 text-white shadow-md'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-              }`}
-            >
-              <span>Day {dayNum}</span>
-              <span className="text-[10px] opacity-75">({getDayDateDayOnly(dayNum)})</span>
-            </button>
-          ))}
+          {dayNumbers.map((dayNum) => {
+            const dateShort = formatDayDateShort(trip.startDate, dayNum);
+            return (
+              <button
+                key={dayNum}
+                onClick={() => setSelectedDay(dayNum)}
+                className={`px-3 sm:px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition whitespace-nowrap flex items-center space-x-1.5 shrink-0 ${
+                  selectedDay === dayNum
+                    ? 'bg-sky-600 text-white shadow-md'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                <span>Day {dayNum}</span>
+                {dateShort && (
+                  <span className={`text-[10px] ${selectedDay === dayNum ? 'text-sky-100' : 'text-slate-400'}`}>
+                    ({dateShort})
+                  </span>
+                )}
+              </button>
+            );
+          })}
         </div>
 
         {/* Add Event Button for active day */}
         <button
           onClick={() => onOpenAddModal(selectedDay === 0 ? 1 : selectedDay)}
-          className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm transition shrink-0"
+          className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm transition shrink-0 cursor-pointer"
         >
           <Plus className="w-4 h-4" />
           <span>{selectedDay > 0 ? `Day ${selectedDay} 일정 추가` : '새 일정 추가'}</span>

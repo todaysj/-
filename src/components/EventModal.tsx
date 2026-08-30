@@ -1,10 +1,12 @@
 import React, { useState, useMemo } from 'react';
 import { ScheduleItem, CategoryType } from '../types';
-import { X, Clock, MapPin, Tag, AlignLeft, DollarSign, Search, ExternalLink, Sparkles, Wallet, Coins, Compass, Check } from 'lucide-react';
+import { X, Clock, MapPin, Tag, AlignLeft, DollarSign, Search, ExternalLink, Sparkles, Wallet, Coins, Compass, Check, MousePointerClick } from 'lucide-react';
 import { GooglePlaceSearchModal } from './GooglePlaceSearchModal';
+import { ManualPinPicker } from './ManualPinPicker';
 import { CurrencySelector } from './CurrencySelector';
 import { convertToKRW, getExchangeRate } from '../utils/currencyUtils';
 import { getGoogleMapsUrl, parseGoogleMapsUrlOrCoords, POPULAR_TRAVEL_SPOTS, PlaceSearchResult } from '../utils/placeSearch';
+import { formatDayDateShort } from '../utils/dateUtils';
 
 interface EventModalProps {
   day: number;
@@ -12,6 +14,7 @@ interface EventModalProps {
   onSave: (item: ScheduleItem) => void;
   editingItem?: ScheduleItem | null;
   totalDays?: number;
+  startDate?: string;
   tripDestination?: string;
   customExchangeRates?: Record<string, number>;
   onAddCustomCurrency?: (code: string, rate: number) => void;
@@ -23,6 +26,7 @@ export const EventModal: React.FC<EventModalProps> = ({
   onSave,
   editingItem,
   totalDays = 10,
+  startDate = '',
   tripDestination = '',
   customExchangeRates,
   onAddCustomCurrency
@@ -40,8 +44,9 @@ export const EventModal: React.FC<EventModalProps> = ({
   const [notes, setNotes] = useState(editingItem ? editingItem.notes || '' : '');
   const [bookingRef, setBookingRef] = useState(editingItem ? editingItem.bookingRef || '' : '');
 
-  // Google Maps Search Modal State
+  // Google Maps Search & Manual Pin States
   const [isPlaceSearchOpen, setIsPlaceSearchOpen] = useState(false);
+  const [isManualPinPickerOpen, setIsManualPinPickerOpen] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
 
@@ -175,11 +180,14 @@ export const EventModal: React.FC<EventModalProps> = ({
                   onChange={(e) => setSelectedDay(Number(e.target.value))}
                   className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:ring-2 focus:ring-sky-500 outline-none"
                 >
-                  {Array.from({ length: Math.max(10, totalDays) }, (_, i) => i + 1).map((d) => (
-                    <option key={d} value={d}>
-                      Day {d}
-                    </option>
-                  ))}
+                  {Array.from({ length: Math.max(1, totalDays) }, (_, i) => i + 1).map((d) => {
+                    const dateShort = startDate ? formatDayDateShort(startDate, d) : '';
+                    return (
+                      <option key={d} value={d}>
+                        Day {d} {dateShort ? `(${dateShort})` : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
@@ -238,13 +246,29 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
             </div>
 
-            {/* Location Section with Google Maps Direct Integration */}
-            <div className="space-y-1.5">
+            {/* Location Section with Google Maps Direct Integration & Manual Pin Adjustment */}
+            <div className="space-y-2">
               <div className="flex items-center justify-between">
                 <label className="block text-xs font-bold text-slate-700">
                   장소 / 위치 <span className="text-slate-400 font-normal">(상호, 주소, 또는 지도 링크)</span>
                 </label>
                 <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsManualPinPickerOpen(!isManualPinPickerOpen);
+                    }}
+                    className={`inline-flex items-center space-x-1 text-[11px] font-bold px-2 py-0.5 rounded-lg transition border cursor-pointer ${
+                      isManualPinPickerOpen
+                        ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
+                        : 'text-slate-700 hover:text-sky-700 bg-slate-100 hover:bg-sky-50 border-slate-300 hover:border-sky-300'
+                    }`}
+                    title="지도에서 클릭하거나 핀을 드래그하여 수동으로 위치를 지정합니다"
+                  >
+                    <MapPin className="w-3 h-3 text-rose-500" />
+                    <span>{isManualPinPickerOpen ? '수동 핀 닫기' : '📍 핀 수동 조정'}</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => setIsPlaceSearchOpen(true)}
@@ -315,9 +339,28 @@ export const EventModal: React.FC<EventModalProps> = ({
                 )}
               </div>
 
+              {/* Interactive Manual Pin Picker Sub-panel */}
+              {isManualPinPickerOpen && (
+                <ManualPinPicker
+                  initialLat={lat}
+                  initialLng={lng}
+                  locationName={location || title}
+                  tripDestination={tripDestination}
+                  onApply={(result) => {
+                    setLat(result.lat);
+                    setLng(result.lng);
+                    if (!location.trim() && result.address) {
+                      setLocation(result.address);
+                    }
+                    setIsManualPinPickerOpen(false);
+                  }}
+                  onClose={() => setIsManualPinPickerOpen(false)}
+                />
+              )}
+
               {/* Google Maps Real-time Auto-link Banner */}
               {location.trim() ? (
-                <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-50/90 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 shadow-2xs">
+                <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 bg-emerald-50/90 border border-emerald-200 rounded-xl text-[11px] text-emerald-900 shadow-2xs">
                   <div className="flex items-center space-x-1.5 truncate">
                     <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 animate-pulse" />
                     <span className="font-bold truncate">
@@ -329,7 +372,17 @@ export const EventModal: React.FC<EventModalProps> = ({
                       </span>
                     )}
                   </div>
-                  <div className="flex items-center space-x-2 shrink-0">
+                  <div className="flex items-center space-x-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setIsManualPinPickerOpen(true)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-white text-sky-700 border border-sky-300 hover:bg-sky-50 font-bold rounded-lg text-[10px] transition cursor-pointer"
+                      title="핀의 위도/경도를 직접 지도에서 드래그하여 미세 조정"
+                    >
+                      <MapPin className="w-2.5 h-2.5 text-rose-500" />
+                      <span>핀 위치 미세 조정</span>
+                    </button>
+
                     <a
                       href={getGoogleMapsUrl(location, lat, lng)}
                       target="_blank"
@@ -344,7 +397,7 @@ export const EventModal: React.FC<EventModalProps> = ({
                 </div>
               ) : (
                 <p className="text-[11px] text-slate-400 px-1">
-                  💡 직접 식당/명소 이름을 적으시면 일정에서 클릭 시 <strong>구글 지도 검색</strong>으로 바로 연결됩니다.
+                  💡 직접 식당/명소 이름을 적으시면 일정에서 클릭 시 <strong>구글 지도 검색</strong>으로 바로 연결되며, <strong>[📍 핀 수동 조정]</strong>으로 원하는 위치에 정확히 핀을 꽂을 수 있습니다.
                 </p>
               )}
             </div>

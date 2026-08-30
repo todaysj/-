@@ -19,6 +19,7 @@ import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
 import { CheckCircle2, WifiOff, AlertTriangle, X } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
+import { getTotalTripDays } from './utils/dateUtils';
 import {
   subscribeToTrips,
   saveTripToFirestore,
@@ -870,6 +871,8 @@ export default function App() {
           day={eventModalDay}
           editingItem={editingScheduleItem}
           tripDestination={activeTrip?.destination || ''}
+          totalDays={activeTrip ? getTotalTripDays(activeTrip) : 10}
+          startDate={activeTrip?.startDate || ''}
           onClose={() => {
             setIsEventModalOpen(false);
             setEditingScheduleItem(null);
