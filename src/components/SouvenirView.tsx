@@ -376,6 +376,53 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
     setShowExitConfirm(false);
   };
 
+  // Track history push state for image lightbox
+  const isLightboxHistoryPushedRef = useRef(false);
+
+  // Safely close lightbox with history synchronization
+  const closeLightbox = useCallback(() => {
+    if (isLightboxHistoryPushedRef.current) {
+      isLightboxHistoryPushedRef.current = false;
+      try {
+        if (window.history.state?.souvenirLightbox) {
+          window.history.back();
+        }
+      } catch (err) {
+        console.warn('History back error:', err);
+      }
+    }
+    setLightboxImages(null);
+  }, []);
+
+  // Dedicated history & back-button management for Image Lightbox
+  useEffect(() => {
+    if (!lightboxImages || lightboxImages.length === 0) return;
+
+    // Push history state when lightbox opens so browser back button closes the image viewer instead of the site
+    window.history.pushState({ souvenirLightbox: true }, '');
+    isLightboxHistoryPushedRef.current = true;
+
+    const handleLightboxPopState = () => {
+      // User pressed back button -> close lightbox without leaving the website
+      isLightboxHistoryPushedRef.current = false;
+      setLightboxImages(null);
+    };
+
+    const handleLightboxKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        closeLightbox();
+      }
+    };
+
+    window.addEventListener('popstate', handleLightboxPopState);
+    window.addEventListener('keydown', handleLightboxKeyDown);
+
+    return () => {
+      window.removeEventListener('popstate', handleLightboxPopState);
+      window.removeEventListener('keydown', handleLightboxKeyDown);
+    };
+  }, [lightboxImages !== null, closeLightbox]);
+
   // Browser back button & ESC key handling for modal
   useEffect(() => {
     if (!isModalOpen) return;
@@ -384,6 +431,10 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
     window.history.pushState({ modalOpen: true }, '');
 
     const handlePopState = () => {
+      // If image lightbox is currently active, ignore modal popstate
+      if (lightboxImages) {
+        return;
+      }
       if (hasUnsavedChanges()) {
         setShowExitConfirm(true);
         // re-push history state to prevent instant navigation away
@@ -402,7 +453,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
         } else if (showExitConfirm) {
           setShowExitConfirm(false);
         } else if (lightboxImages) {
-          setLightboxImages(null);
+          closeLightbox();
         } else {
           requestCloseModal();
         }
@@ -416,7 +467,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
       window.removeEventListener('popstate', handlePopState);
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isModalOpen, hasUnsavedChanges, requestCloseModal, showExitConfirm, lightboxImages, itemToDelete, tagToDelete]);
+  }, [isModalOpen, hasUnsavedChanges, requestCloseModal, showExitConfirm, lightboxImages, itemToDelete, tagToDelete, closeLightbox]);
 
   // Multiple Image file upload handler (supports up to 2 photos with ultra-lightweight multi-stage compression)
   const handleImageFilesChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1805,7 +1856,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
       {/* 🌟 IMAGE LIGHTBOX MODAL (Supports Single & Multi-image carousel) */}
       {lightboxImages && lightboxImages.length > 0 && (
         <div
-          onClick={() => setLightboxImages(null)}
+          onClick={closeLightbox}
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm animate-fade-in cursor-zoom-out"
         >
           <div
@@ -1873,7 +1924,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
             {/* Close Lightbox Button */}
             <button
               type="button"
-              onClick={() => setLightboxImages(null)}
+              onClick={closeLightbox}
               className="absolute -top-3 -right-3 sm:top-2 sm:right-2 p-2 bg-black/70 hover:bg-black/95 text-white rounded-full transition cursor-pointer shadow-lg z-10"
               title="닫기"
             >

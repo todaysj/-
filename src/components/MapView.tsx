@@ -20,8 +20,18 @@ export const MapView: React.FC<MapViewProps> = ({ trip }) => {
   const mapInstanceRef = useRef<L.Map | null>(null);
   const [selectedDay, setSelectedDay] = useState<number>(0); // 0 = all
 
+  // Clean up Leaflet instance when component unmounts
+  useEffect(() => {
+    return () => {
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
+    };
+  }, []);
+
   // Calculate dynamic total days from startDate, endDate, and existing schedule items
-  const totalDays = getTotalTripDays(trip);
+  const totalDays = trip ? getTotalTripDays(trip) : 1;
   const dayNumbers = Array.from({ length: totalDays }, (_, i) => i + 1);
 
   // Auto-adjust selectedDay if trip dates were shortened and selectedDay is out of bounds
@@ -31,13 +41,15 @@ export const MapView: React.FC<MapViewProps> = ({ trip }) => {
     }
   }, [totalDays, selectedDay]);
 
+  const scheduleList = trip?.schedule || [];
+
   // Items that have lat & lng for Leaflet rendering (sorted chronologically)
-  const itemsWithCoords = trip.schedule
+  const itemsWithCoords = scheduleList
     .filter((item) => (selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay) && item.lat && item.lng)
     .sort((a, b) => (a.day !== b.day ? a.day - b.day : a.time.localeCompare(b.time)));
 
   // All items with a location name for list display
-  const itemsWithLocation = trip.schedule
+  const itemsWithLocation = scheduleList
     .filter((item) => (selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay) && item.location && item.location.trim().length > 0)
     .sort((a, b) => (a.day !== b.day ? a.day - b.day : a.time.localeCompare(b.time)));
 

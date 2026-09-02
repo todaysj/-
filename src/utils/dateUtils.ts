@@ -108,3 +108,14 @@ export function formatTripNightsAndDays(startDateStr: string, endDateStr: string
   const nights = days - 1;
   return `${nights}박 ${days}일`;
 }
+
+/**
+ * Remove any trailing schedule count suffixes like (10개 일정), (10개), (일정 10개) from trip titles
+ */
+export function cleanTripTitle(title?: string): string {
+  if (!title) return '';
+  return title
+    .replace(/\s*\(\s*\d+\s*개\s*(일정)?\s*\)/gi, '')
+    .replace(/\s*\(일정\s*\d+\s*개\s*\)/gi, '')
+    .trim();
+}

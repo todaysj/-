@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Trip } from '../types';
+import { cleanTripTitle } from '../utils/dateUtils';
 import {
   X,
   ArrowUp,
@@ -180,7 +181,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
 
                   <div className="min-w-0 flex-1">
                     <div className="font-bold text-sm text-slate-900 truncate flex items-center space-x-1.5">
-                      <span>{trip.title}</span>
+                      <span>{cleanTripTitle(trip.title)}</span>
                     </div>
                     <div className="flex items-center space-x-2 text-xs text-slate-500 mt-0.5">
                       <span className="flex items-center space-x-1 truncate">

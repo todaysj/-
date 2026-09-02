@@ -9,7 +9,8 @@ import {
   formatDayDateDayOnly,
   formatDayDateKorean,
   formatDayDateFull,
-  formatTripNightsAndDays
+  formatTripNightsAndDays,
+  cleanTripTitle
 } from '../utils/dateUtils';
 
 interface ItineraryViewProps {
@@ -146,7 +147,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             </div>
           </div>
           <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight text-white mb-2 line-clamp-2">
-            {trip.title}
+            {cleanTripTitle(trip.title)}
           </h2>
           <div className="flex flex-wrap items-center gap-x-4 sm:gap-x-6 gap-y-1 text-xs sm:text-sm text-slate-300">
             <div>

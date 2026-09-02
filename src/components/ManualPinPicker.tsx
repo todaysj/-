@@ -163,6 +163,10 @@ export const ManualPinPicker: React.FC<ManualPinPickerProps> = ({
 
     return () => {
       clearTimeout(timer);
+      if (mapInstanceRef.current) {
+        mapInstanceRef.current.remove();
+        mapInstanceRef.current = null;
+      }
     };
   }, []);
 

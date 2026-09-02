@@ -4,6 +4,7 @@ import { Trip, TabType, SouvenirTabConfig, ChecklistTabConfig, ScheduleItem, Res
 import { INITIAL_TRIPS } from '../data/mockData';
 import { detachTripPhotos, resolveTripPhotos } from '../utils/imageUtils';
 import { getTripSouvenirTabs, getTripChecklistTabs, unionSouvenirItems, DEFAULT_PACKING_CATEGORIES, DEFAULT_SOUVENIR_TAGS } from '../utils/tabUtils';
+import { cleanTripTitle } from '../utils/dateUtils';
 import { saveTripBackup, saveTripsToIDB, getTripsFromIDB } from '../utils/tripIndexedDB';
 
 const TRIPS_COLLECTION = 'trips';
@@ -234,7 +235,10 @@ export function getStoredTrips(): Trip[] {
     if (cached !== null) {
       const parsed = JSON.parse(cached);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+        return parsed.map((t) => ({
+          ...t,
+          title: cleanTripTitle(t.title)
+        }));
       }
     }
   } catch (error) {
@@ -621,17 +625,22 @@ export function subscribeToTrips(
 
           rawRemoteTrips.forEach((remote) => {
             const local = localTrips.find((t) => t.id === remote.id);
-            if (local && pendingTripWrites.has(remote.id)) {
-              finalTrips.push(reconcileSingleTrip(local, remote));
-            } else {
-              finalTrips.push(remote);
-            }
+            const chosen = local && pendingTripWrites.has(remote.id)
+              ? reconcileSingleTrip(local, remote)
+              : remote;
+            finalTrips.push({
+              ...chosen,
+              title: cleanTripTitle(chosen.title)
+            });
           });
 
           // Only keep local trips that are currently pending a write to Firestore
           for (const local of localTrips) {
             if (pendingTripWrites.has(local.id) && !finalTrips.some((t) => t.id === local.id)) {
-              finalTrips.push(local);
+              finalTrips.push({
+                ...local,
+                title: cleanTripTitle(local.title)
+              });
             }
           }
 

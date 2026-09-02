@@ -30,7 +30,8 @@ import {
   calculateTripDays,
   formatTripNightsAndDays,
   parseLocalDate,
-  formatDateToISO
+  formatDateToISO,
+  cleanTripTitle
 } from '../utils/dateUtils';
 
 interface EditTripModalProps {
@@ -56,7 +57,7 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
   onDeleteTrip,
   onDuplicateTrip
 }) => {
-  const [title, setTitle] = useState(trip.title);
+  const [title, setTitle] = useState(cleanTripTitle(trip.title));
   const [destination, setDestination] = useState(trip.destination);
   const [startDate, setStartDate] = useState(trip.startDate);
   const [endDate, setEndDate] = useState(trip.endDate);

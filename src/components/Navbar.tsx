@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Trip, TabType } from '../types';
 import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { getTripChecklistTabs, getTripSouvenirTabs } from '../utils/tabUtils';
+import { cleanTripTitle } from '../utils/dateUtils';
 import { SyncStatus } from '../lib/tripService';
 
 interface NavbarProps {
@@ -382,7 +383,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 >
                   {trips.map((trip) => (
                     <option key={trip.id} value={trip.id}>
-                      ✈️ {trip.title} ({trip.schedule?.length || 0}개 일정)
+                      ✈️ {cleanTripTitle(trip.title)}
                     </option>
                   ))}
                 </select>
@@ -495,7 +496,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             </span>
             {trips.map((trip) => {
               const isSelected = trip.id === activeTrip.id;
-              const schedCount = trip.schedule?.length || 0;
               return (
                 <button
                   key={`quick-trip-${trip.id}`}
@@ -506,12 +506,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       : 'bg-slate-800/80 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/60'
                   }`}
                 >
-                  <span>✈️ {trip.title}</span>
-                  <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
-                    isSelected ? 'bg-sky-900/80 text-sky-100' : 'bg-slate-900/80 text-slate-300'
-                  }`}>
-                    일정 {schedCount}개
-                  </span>
+                  <span>✈️ {cleanTripTitle(trip.title)}</span>
                 </button>
               );
             })}

@@ -27,6 +27,7 @@ import {
   Gift
 } from 'lucide-react';
 import { TabType, Trip } from '../types';
+import { cleanTripTitle } from '../utils/dateUtils';
 
 export const DEFAULT_TAB_ORDER: TabType[] = ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'];
 
@@ -372,7 +373,7 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
                         )}
                         <div className="min-w-0 flex-1">
                           <p className="font-bold text-xs sm:text-sm text-slate-900 truncate">
-                            {trip.title}
+                            {cleanTripTitle(trip.title)}
                           </p>
                           <p className="text-[11px] text-slate-500 truncate">
                             {trip.destination} · {trip.startDate}
