@@ -3,6 +3,8 @@
  * Ensures 100% accurate, timezone-safe date synchronization across Itinerary, Map, and Modals.
  */
 
+import { ScheduleItem } from '../types';
+
 const KOREAN_DAY_NAMES = ['일', '월', '화', '수', '목', '금', '토'];
 
 /**
@@ -119,3 +121,194 @@ export function cleanTripTitle(title?: string): string {
     .replace(/\s*\(일정\s*\d+\s*개\s*\)/gi, '')
     .trim();
 }
+
+/**
+ * Auto-links start time and default end time when inserting a schedule item.
+ * - Start time: directly matches the previous schedule item's end time (or start time if no end time)
+ * - End time: default interval (1 hour later, or gap before next item) with user-editable capability
+ */
+export function getAutoLinkedTimes(
+  prevItem?: { time?: string; endTime?: string; day?: number },
+  nextItem?: { time?: string; endTime?: string; day?: number }
+): { startTime: string; endTime: string } {
+  let startTime = '10:00';
+  if (prevItem) {
+    if (prevItem.endTime && prevItem.endTime.trim()) {
+      startTime = prevItem.endTime.trim();
+    } else if (prevItem.time && prevItem.time.trim()) {
+      startTime = prevItem.time.trim();
+    }
+  }
+
+  let startMinutes = 10 * 60;
+  const match = startTime.match(/^(\d{1,2}):(\d{2})$/);
+  if (match) {
+    const h = parseInt(match[1], 10);
+    const m = parseInt(match[2], 10);
+    startMinutes = h * 60 + m;
+  }
+
+  let endMinutes = startMinutes + 60;
+
+  if (nextItem && nextItem.time) {
+    const nextMatch = nextItem.time.match(/^(\d{1,2}):(\d{2})$/);
+    if (nextMatch) {
+      const nextH = parseInt(nextMatch[1], 10);
+      const nextM = parseInt(nextMatch[2], 10);
+      const nextMinutes = nextH * 60 + nextM;
+
+      const isSameDay =
+        !prevItem ||
+        prevItem.day === undefined ||
+        nextItem.day === undefined ||
+        prevItem.day === nextItem.day;
+
+      if (isSameDay && nextMinutes > startMinutes) {
+        const gap = nextMinutes - startMinutes;
+        if (gap <= 60) {
+          endMinutes = nextMinutes;
+        } else {
+          endMinutes = startMinutes + 60;
+        }
+      }
+    }
+  }
+
+  if (endMinutes >= 24 * 60) {
+    endMinutes = 23 * 60 + 59;
+  }
+
+  const endH = Math.floor(endMinutes / 60);
+  const endM = endMinutes % 60;
+  const endTime = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+
+  return { startTime, endTime };
+}
+
+/**
+ * Convert "HH:MM" string to minutes from start of day (0 ~ 1439)
+ */
+export function timeStringToMinutes(timeStr?: string): number {
+  if (!timeStr) return 0;
+  const match = timeStr.trim().match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) return 0;
+  return parseInt(match[1], 10) * 60 + parseInt(match[2], 10);
+}
+
+/**
+ * Convert minutes from start of day to "HH:MM" format
+ */
+export function minutesToTimeString(minutes: number): string {
+  const bounded = Math.max(0, Math.min(23 * 60 + 59, Math.round(minutes)));
+  const h = Math.floor(bounded / 60);
+  const m = bounded % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
+/**
+ * Shift subsequent schedule items on the same day when a new or updated item conflicts with them.
+ * Preserves the original duration of each shifted item and cascades forward cleanly.
+ */
+export function adjustSubsequentSchedules(
+  schedule: ScheduleItem[],
+  targetItem: ScheduleItem,
+  insertAfterId?: string
+): { updatedSchedule: ScheduleItem[]; shiftedCount: number } {
+  // If targetItem has no valid start time, return unchanged
+  if (!targetItem.time) {
+    return { updatedSchedule: schedule, shiftedCount: 0 };
+  }
+
+  const targetDay = targetItem.day;
+  const targetStart = timeStringToMinutes(targetItem.time);
+  const targetEnd = targetItem.endTime
+    ? timeStringToMinutes(targetItem.endTime)
+    : targetStart;
+
+  // We only shift if targetEnd > targetStart (the item occupies a time interval)
+  if (targetEnd <= targetStart) {
+    return { updatedSchedule: schedule, shiftedCount: 0 };
+  }
+
+  // Find index of targetItem in the current schedule array
+  const targetIndex = schedule.findIndex((item) => item.id === targetItem.id);
+
+  let minNextStart = targetEnd;
+  let shiftedCount = 0;
+
+  // Track modified items by id
+  const modifiedMap = new Map<string, { time: string; endTime?: string }>();
+
+  // Filter all candidate subsequent items on the same day
+  const candidateItems = schedule.filter((item, idx) => {
+    if (item.day !== targetDay || item.id === targetItem.id) return false;
+    const itemStart = timeStringToMinutes(item.time);
+
+    // If inserted after a specific item, all items after that index on the same day
+    if (targetIndex >= 0 && idx > targetIndex) {
+      return true;
+    }
+
+    // Otherwise, any item starting at or after targetItem's original start time
+    return itemStart >= targetStart;
+  });
+
+  // Sort candidate items in chronological order to cascade shifts sequentially
+  const sortedCandidates = [...candidateItems].sort((a, b) => {
+    const aStart = timeStringToMinutes(a.time);
+    const bStart = timeStringToMinutes(b.time);
+    if (aStart !== bStart) return aStart - bStart;
+    return schedule.indexOf(a) - schedule.indexOf(b);
+  });
+
+  for (const item of sortedCandidates) {
+    const itemStart = timeStringToMinutes(item.time);
+
+    if (itemStart < minNextStart) {
+      // Conflict! Shift item to start at minNextStart
+      shiftedCount++;
+      const duration = item.endTime
+        ? Math.max(0, timeStringToMinutes(item.endTime) - itemStart)
+        : 0;
+
+      const newStartMinutes = minNextStart;
+      const newEndMinutes = item.endTime
+        ? Math.min(23 * 60 + 59, newStartMinutes + duration)
+        : undefined;
+
+      const newTime = minutesToTimeString(newStartMinutes);
+      const newEndTime = newEndMinutes !== undefined
+        ? minutesToTimeString(newEndMinutes)
+        : undefined;
+
+      modifiedMap.set(item.id, { time: newTime, endTime: newEndTime });
+
+      // Update minimum start time for subsequent items
+      minNextStart = newEndMinutes !== undefined ? newEndMinutes : newStartMinutes;
+    } else {
+      // No conflict, but this item's end time determines the boundary for subsequent items
+      if (item.endTime) {
+        minNextStart = Math.max(minNextStart, timeStringToMinutes(item.endTime));
+      } else {
+        minNextStart = Math.max(minNextStart, itemStart);
+      }
+    }
+  }
+
+  // Construct updated schedule with modified items
+  const updatedSchedule = schedule.map((item) => {
+    const mod = modifiedMap.get(item.id);
+    if (mod) {
+      return {
+        ...item,
+        time: mod.time,
+        endTime: mod.endTime
+      };
+    }
+    return item;
+  });
+
+  return { updatedSchedule, shiftedCount };
+}
+
+

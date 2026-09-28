@@ -11,13 +11,16 @@ import { formatDayDateShort } from '../utils/dateUtils';
 interface EventModalProps {
   day: number;
   onClose: () => void;
-  onSave: (item: ScheduleItem) => void;
+  onSave: (item: ScheduleItem, insertAfterId?: string, shiftSubsequent?: boolean) => void;
   editingItem?: ScheduleItem | null;
   totalDays?: number;
   startDate?: string;
   tripDestination?: string;
   customExchangeRates?: Record<string, number>;
   onAddCustomCurrency?: (code: string, rate: number) => void;
+  initialTime?: string;
+  initialEndTime?: string;
+  insertAfterId?: string;
 }
 
 export const EventModal: React.FC<EventModalProps> = ({
@@ -29,12 +32,16 @@ export const EventModal: React.FC<EventModalProps> = ({
   startDate = '',
   tripDestination = '',
   customExchangeRates,
-  onAddCustomCurrency
+  onAddCustomCurrency,
+  initialTime,
+  initialEndTime,
+  insertAfterId
 }) => {
   const [selectedDay, setSelectedDay] = useState<number>(editingItem ? editingItem.day : day);
   const [title, setTitle] = useState(editingItem ? editingItem.title : '');
-  const [time, setTime] = useState(editingItem ? editingItem.time : '10:00');
-  const [endTime, setEndTime] = useState(editingItem ? editingItem.endTime || '' : '');
+  const [time, setTime] = useState(editingItem ? editingItem.time : (initialTime || '10:00'));
+  const [endTime, setEndTime] = useState(editingItem ? (editingItem.endTime || '') : (initialEndTime || ''));
+  const [shiftSubsequent, setShiftSubsequent] = useState<boolean>(true);
   const [category, setCategory] = useState<CategoryType>(editingItem ? editingItem.category : 'SIGHTSEEING');
   const [location, setLocation] = useState(editingItem ? editingItem.location : '');
   const [lat, setLat] = useState<number | undefined>(editingItem?.lat);
@@ -149,7 +156,7 @@ export const EventModal: React.FC<EventModalProps> = ({
         notes: notes.trim(),
         bookingRef: bookingRef.trim(),
         isDone: editingItem ? editingItem.isDone : false
-      });
+      }, insertAfterId, shiftSubsequent);
       onClose();
     } catch (err) {
       console.error('상세 에러 (EventModal handleSubmit):', err);
@@ -217,9 +224,41 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  종료 시간 <span className="text-slate-400 font-normal">(선택)</span>
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-bold text-slate-700">
+                    종료 시간 <span className="text-slate-400 font-normal">(선택)</span>
+                  </label>
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const match = time.match(/^(\d{1,2}):(\d{2})$/);
+                        if (match) {
+                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 30);
+                          setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
+                        }
+                      }}
+                      className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
+                      title="시작 시간 기준 30분 뒤로 설정"
+                    >
+                      +30분
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const match = time.match(/^(\d{1,2}):(\d{2})$/);
+                        if (match) {
+                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 60);
+                          setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
+                        }
+                      }}
+                      className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
+                      title="시작 시간 기준 1시간 뒤로 설정"
+                    >
+                      +1시간
+                    </button>
+                  </div>
+                </div>
                 <input
                   type="time"
                   value={endTime}
@@ -244,6 +283,29 @@ export const EventModal: React.FC<EventModalProps> = ({
                   <option value="OTHER">기타</option>
                 </select>
               </div>
+            </div>
+
+            {/* Auto-shift subsequent schedules toggle */}
+            <div className="bg-sky-50/80 border border-sky-200/90 rounded-xl px-3.5 py-2.5 transition">
+              <label className="flex items-start space-x-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={shiftSubsequent}
+                  onChange={(e) => setShiftSubsequent(e.target.checked)}
+                  className="w-4 h-4 mt-0.5 text-sky-600 rounded border-slate-300 focus:ring-sky-500 cursor-pointer shrink-0"
+                />
+                <div className="flex flex-col">
+                  <span className="text-xs text-slate-800 font-bold flex items-center gap-1.5">
+                    <span>뒤의 일정 시간 자동 조정</span>
+                    <span className="text-[10px] font-bold text-sky-700 bg-sky-100/90 px-1.5 py-0.5 rounded">
+                      시간 겹침 순연
+                    </span>
+                  </span>
+                  <span className="text-[11px] text-slate-500 mt-0.5 leading-tight">
+                    이 일정의 끝나는 시간에 맞춰 겹치는 뒤쪽 일정들의 시작/종료 시간을 자동으로 뒤로 미룹니다.
+                  </span>
+                </div>
+              </label>
             </div>
 
             {/* Location Section with Google Maps Direct Integration & Manual Pin Adjustment */}

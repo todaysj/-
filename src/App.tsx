@@ -19,7 +19,7 @@ import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
 import { CheckCircle2, WifiOff, AlertTriangle, X } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
-import { getTotalTripDays } from './utils/dateUtils';
+import { getTotalTripDays, adjustSubsequentSchedules } from './utils/dateUtils';
 import {
   subscribeToTrips,
   saveTripToFirestore,
@@ -184,6 +184,9 @@ export default function App() {
   const [isEventModalOpen, setIsEventModalOpen] = useState(false);
   const [eventModalDay, setEventModalDay] = useState<number>(1);
   const [editingScheduleItem, setEditingScheduleItem] = useState<ScheduleItem | null>(null);
+  const [eventModalInitialTime, setEventModalInitialTime] = useState<string | undefined>();
+  const [eventModalInitialEndTime, setEventModalInitialEndTime] = useState<string | undefined>();
+  const [eventModalInsertAfterId, setEventModalInsertAfterId] = useState<string | undefined>();
   const [isReservationModalOpen, setIsReservationModalOpen] = useState(false);
   const [isNewTripModalOpen, setIsNewTripModalOpen] = useState(false);
   const [isEditTripModalOpen, setIsEditTripModalOpen] = useState(false);
@@ -387,14 +390,42 @@ export default function App() {
     }));
   };
 
-  const handleSaveScheduleItem = (savedItem: ScheduleItem) => {
+  const handleSaveScheduleItem = (
+    savedItem: ScheduleItem,
+    insertAfterId?: string,
+    shiftSubsequent: boolean = true
+  ) => {
     updateActiveTrip((trip) => {
       const exists = trip.schedule.some((s) => s.id === savedItem.id);
       let newSchedule: ScheduleItem[];
       if (exists) {
         newSchedule = trip.schedule.map((s) => (s.id === savedItem.id ? savedItem : s));
+      } else if (insertAfterId) {
+        const prevIdx = trip.schedule.findIndex((s) => s.id === insertAfterId);
+        if (prevIdx !== -1) {
+          newSchedule = [
+            ...trip.schedule.slice(0, prevIdx + 1),
+            savedItem,
+            ...trip.schedule.slice(prevIdx + 1)
+          ];
+        } else {
+          newSchedule = [...trip.schedule, savedItem];
+        }
       } else {
         newSchedule = [...trip.schedule, savedItem];
+      }
+
+      // Auto-shift subsequent schedules if enabled
+      let shiftedCount = 0;
+      if (shiftSubsequent) {
+        const result = adjustSubsequentSchedules(newSchedule, savedItem, insertAfterId);
+        newSchedule = result.updatedSchedule;
+        shiftedCount = result.shiftedCount;
+      }
+
+      if (shiftedCount > 0) {
+        setToastMessage(`일정이 저장되고, 뒤의 ${shiftedCount}개 일정이 자동 순연되었습니다.`);
+        setTimeout(() => setToastMessage(null), 3500);
       }
 
       // 🌟 Synchronize schedule item cost to Budget & Expenses (예산 & 가계부 연동)
@@ -810,11 +841,17 @@ export default function App() {
             onEditItem={(item) => {
               setEditingScheduleItem(item);
               setEventModalDay(item.day);
+              setEventModalInitialTime(undefined);
+              setEventModalInitialEndTime(undefined);
+              setEventModalInsertAfterId(undefined);
               setIsEventModalOpen(true);
             }}
-            onOpenAddModal={(day) => {
+            onOpenAddModal={(day, defaultTime, defaultEndTime, insertAfterId) => {
               setEditingScheduleItem(null);
               setEventModalDay(day);
+              setEventModalInitialTime(defaultTime);
+              setEventModalInitialEndTime(defaultEndTime);
+              setEventModalInsertAfterId(insertAfterId);
               setIsEventModalOpen(true);
             }}
             onOpenEditTripModal={handleRequestEditTrip}
@@ -870,12 +907,18 @@ export default function App() {
         <EventModal
           day={eventModalDay}
           editingItem={editingScheduleItem}
+          initialTime={eventModalInitialTime}
+          initialEndTime={eventModalInitialEndTime}
+          insertAfterId={eventModalInsertAfterId}
           tripDestination={activeTrip?.destination || ''}
           totalDays={activeTrip ? getTotalTripDays(activeTrip) : 10}
           startDate={activeTrip?.startDate || ''}
           onClose={() => {
             setIsEventModalOpen(false);
             setEditingScheduleItem(null);
+            setEventModalInitialTime(undefined);
+            setEventModalInitialEndTime(undefined);
+            setEventModalInsertAfterId(undefined);
           }}
           onSave={handleSaveScheduleItem}
         />
