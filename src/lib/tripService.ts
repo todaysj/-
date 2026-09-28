@@ -1,4 +1,4 @@
-import { collection, doc, onSnapshot, setDoc, deleteDoc, disableNetwork } from 'firebase/firestore';
+import { collection, doc, onSnapshot, setDoc, deleteDoc, enableNetwork } from 'firebase/firestore';
 import { db } from './firebase';
 import { Trip, TabType, SouvenirTabConfig, ChecklistTabConfig, ScheduleItem, Reservation, ExpenseItem, PackingItem } from '../types';
 import { INITIAL_TRIPS } from '../data/mockData';
@@ -33,6 +33,16 @@ let currentSyncStatus: SyncStatusInfo = {
 const QUOTA_STORAGE_KEY = 'jplanner_quota_exceeded_until';
 
 /**
+ * Ensure Firestore network connection is active
+ */
+if (typeof window !== 'undefined') {
+  try {
+    localStorage.removeItem(QUOTA_STORAGE_KEY);
+    enableNetwork(db).catch(() => {});
+  } catch {}
+}
+
+/**
  * Check if the Firebase free write quota is temporarily exhausted
  */
 export function isQuotaExceeded(): boolean {
@@ -52,26 +62,16 @@ export function isQuotaExceeded(): boolean {
 }
 
 /**
- * Mark quota as exhausted and switch seamlessly to resilient Local-First storage mode
+ * Mark quota as temporarily paused if rate limited (graceful non-destructive notice)
  */
-export function setQuotaExceeded(durationMs = 24 * 60 * 60 * 1000): void {
+export function setQuotaExceeded(durationMs = 60 * 1000): void {
   try {
     if (typeof window !== 'undefined') {
       const until = Date.now() + durationMs;
       localStorage.setItem(QUOTA_STORAGE_KEY, until.toString());
     }
   } catch {}
-  try {
-    disableNetwork(db).catch(() => {});
-  } catch {}
   updateSyncStatus('local-saved', '로컬 안전 저장 모드 (기기 내 100% 보관)');
-}
-
-// If quota was already exceeded in this browser session, disable network immediately
-if (isQuotaExceeded()) {
-  try {
-    disableNetwork(db).catch(() => {});
-  } catch {}
 }
 
 /**
@@ -324,8 +324,12 @@ export function getStoredBrandSettings() {
  * Intelligently reconciles a local trip with a remote trip from Firestore.
  * GUARANTEE: Never drops any souvenir item, packing item, schedule item, reservation, or expense!
  */
-export function reconcileSingleTrip(localTrip: Trip | undefined, remoteTrip: Trip): Trip {
-  if (!localTrip) return remoteTrip;
+export function reconcileSingleTrip(localTrip?: Trip | null, remoteTrip?: Trip | null): Trip {
+  if (!localTrip && !remoteTrip) {
+    return INITIAL_TRIPS[0] || ({ id: 'default', title: '여행', schedule: [] } as any);
+  }
+  if (!localTrip) return JSON.parse(JSON.stringify(remoteTrip!));
+  if (!remoteTrip) return JSON.parse(JSON.stringify(localTrip));
 
   const isLocalPreferred =
     (localTrip.updatedAt || 0) >= (remoteTrip.updatedAt || 0) || pendingTripWrites.has(remoteTrip.id);
@@ -458,7 +462,7 @@ function hasBase64Images(trip: Trip): boolean {
 /**
  * Save trip to local cache, IndexedDB backup history, and direct to Firestore
  */
-export async function saveTripToFirestore(trip: Trip): Promise<void> {
+export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false): Promise<void> {
   const timestampedTrip: Trip = {
     ...trip,
     updatedAt: Date.now()
@@ -521,6 +525,25 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     clearTimeout(watchdog);
     pendingTripWrites.delete(cleanTrip.id);
     updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
+    return;
+  }
+
+  // Direct immediate write if requested (e.g., during backup restore or explicit user save)
+  if (forceDirectWrite) {
+    try {
+      const payloadHash = JSON.stringify(safePayload);
+      await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      lastWrittenTripHash.set(cleanTrip.id, payloadHash);
+      clearTimeout(watchdog);
+      updateSyncStatus('synced', '실시간 동기화됨');
+    } catch (err: any) {
+      console.warn('Direct Firestore write:', err);
+      if (isQuotaError(err)) {
+        setQuotaExceeded();
+      }
+    } finally {
+      pendingTripWrites.delete(cleanTrip.id);
+    }
     return;
   }
 
@@ -696,14 +719,20 @@ export function subscribeToTrips(
           const finalTrips: Trip[] = [];
 
           rawRemoteTrips.forEach((remote) => {
-            const local = localTrips.find((t) => t.id === remote.id);
-            const isLocalNewerOrEqual = (local?.updatedAt || 0) >= (remote.updatedAt || 0);
-            const chosen = local && (isLocalNewerOrEqual || pendingTripWrites.has(remote.id))
-              ? reconcileSingleTrip(local, remote)
-              : reconcileSingleTrip(remote, local);
+            if (!remote || !remote.id) return;
+            const local = localTrips.find((t) => t && t.id === remote.id);
+            let chosen: Trip;
+            if (!local) {
+              chosen = remote;
+            } else {
+              const isLocalNewerOrEqual = (local.updatedAt || 0) >= (remote.updatedAt || 0);
+              chosen = (isLocalNewerOrEqual || pendingTripWrites.has(remote.id))
+                ? reconcileSingleTrip(local, remote)
+                : reconcileSingleTrip(remote, local);
+            }
             finalTrips.push({
               ...chosen,
-              title: cleanTripTitle(chosen.title)
+              title: cleanTripTitle(chosen.title || '')
             });
           });
 

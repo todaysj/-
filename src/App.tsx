@@ -60,22 +60,26 @@ const resolveBestTripId = (
   }
 
   // 3. Trip with the most registered schedule items
-  const sortedBySchedule = [...tripList].sort((a, b) => {
-    const aSched = a.schedule?.length || 0;
-    const bSched = b.schedule?.length || 0;
+  const validTrips = (tripList || []).filter((t): t is Trip => Boolean(t && t.id));
+  if (validTrips.length === 0) return 'trip-1787213502723';
+
+  const sortedBySchedule = [...validTrips].sort((a, b) => {
+    const aSched = a?.schedule?.length || 0;
+    const bSched = b?.schedule?.length || 0;
     if (bSched !== aSched) return bSched - aSched;
-    return (b.updatedAt || 0) - (a.updatedAt || 0);
+    return (b?.updatedAt || 0) - (a?.updatedAt || 0);
   });
 
-  return sortedBySchedule[0]?.id || tripList[0].id;
+  return sortedBySchedule[0]?.id || validTrips[0]?.id || 'trip-1787213502723';
 };
 
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
-  if (!order || order.length === 0) return tripsToSort;
+  const valid = (tripsToSort || []).filter((t): t is Trip => Boolean(t && t.id));
+  if (!order || order.length === 0) return valid;
   const orderMap = new Map(order.map((id, index) => [id, index]));
-  return [...tripsToSort].sort((a, b) => {
-    const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 9999;
-    const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 9999;
+  return [...valid].sort((a, b) => {
+    const idxA = a?.id && orderMap.has(a.id) ? orderMap.get(a.id)! : 9999;
+    const idxB = b?.id && orderMap.has(b.id) ? orderMap.get(b.id)! : 9999;
     return idxA - idxB;
   });
 };
@@ -841,9 +845,9 @@ export default function App() {
           }
         } catch {}
 
-        // 4. Safely sync to Firestore (lightweight data; photos detached to avoid 1MB document limit)
+        // 4. Safely sync directly to Firestore for instant cross-device synchronization
         for (const trip of result.trips) {
-          saveTripToFirestore(trip);
+          await saveTripToFirestore(trip, true);
         }
 
         // 5. Notify user

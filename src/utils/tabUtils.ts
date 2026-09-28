@@ -47,7 +47,8 @@ export function getTagColorInfo(tag: string, customTagColors?: Record<string, st
 /**
  * Get all checklist tabs for a trip, combining legacy packingList items with tabs to ensure 0 data loss
  */
-export function getTripChecklistTabs(trip: Trip): ChecklistTabConfig[] {
+export function getTripChecklistTabs(trip?: Trip | null): ChecklistTabConfig[] {
+  if (!trip) return [];
   let baseTabs: ChecklistTabConfig[] = [];
   if (trip.checklistTabs && Array.isArray(trip.checklistTabs) && trip.checklistTabs.length > 0) {
     baseTabs = JSON.parse(JSON.stringify(trip.checklistTabs));
@@ -83,7 +84,8 @@ export function getTripChecklistTabs(trip: Trip): ChecklistTabConfig[] {
 /**
  * Get all souvenir tabs for a trip, uniting legacy souvenirs array with tabs to ensure 0 data loss
  */
-export function getTripSouvenirTabs(trip: Trip): SouvenirTabConfig[] {
+export function getTripSouvenirTabs(trip?: Trip | null): SouvenirTabConfig[] {
+  if (!trip) return [];
   let baseTabs: SouvenirTabConfig[] = [];
   if (trip.souvenirTabs && Array.isArray(trip.souvenirTabs) && trip.souvenirTabs.length > 0) {
     baseTabs = JSON.parse(JSON.stringify(trip.souvenirTabs));
