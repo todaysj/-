@@ -35,7 +35,8 @@ import {
 } from './lib/tripService';
 import { getAllLocalPhotos, savePhotoToCloud } from './utils/photoStore';
 import { resolveTripPhotos } from './utils/imageUtils';
-import { getTripsFromIDB } from './utils/tripIndexedDB';
+import { getTripsFromIDB, saveTripsToIDB, saveTripBackup } from './utils/tripIndexedDB';
+import { parseTripBackup } from './utils/backupUtils';
 
 const STORAGE_LAST_TRIP_KEY = 'jplanner_last_active_trip_id';
 
@@ -780,13 +781,83 @@ export default function App() {
   const handleImportTrip = (importedTrip: Trip) => {
     setTrips((prev) => {
       const exists = prev.some((t) => t.id === importedTrip.id);
-      if (exists) {
-        return prev.map((t) => (t.id === importedTrip.id ? importedTrip : t));
-      }
-      return [importedTrip, ...prev];
+      const updated = exists
+        ? prev.map((t) => (t.id === importedTrip.id ? importedTrip : t))
+        : [importedTrip, ...prev];
+      saveTripsToIDB(updated).catch(() => {});
+      saveTripBackup(importedTrip).catch(() => {});
+      return updated;
     });
     handleSelectTrip(importedTrip.id);
     saveTripToFirestore(importedTrip);
+  };
+
+  // Handler for full backup file restore (trip-backup.json)
+  const handleRestoreBackup = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      try {
+        const content = event.target?.result as string;
+        const result = parseTripBackup(content);
+
+        // 1. Immediately cache in browser storage (IndexedDB + LocalStorage) to guarantee 100% data persistence
+        await saveTripsToIDB(result.trips).catch((err) => {
+          console.error('IDB save error during restore:', err);
+        });
+        for (const trip of result.trips) {
+          saveTripBackup(trip).catch(() => {});
+        }
+        saveTripsToLocalStorage(result.trips);
+
+        // 2. Restore brand settings if included in backup
+        if (result.brandSettings) {
+          if (result.brandSettings.title) setBrandTitle(result.brandSettings.title);
+          if (result.brandSettings.subtitle) setBrandSubtitle(result.brandSettings.subtitle);
+          if (result.brandSettings.badge) setBrandBadge(result.brandSettings.badge);
+          if (Array.isArray(result.brandSettings.tabOrder) && result.brandSettings.tabOrder.length > 0) {
+            setTabOrder(result.brandSettings.tabOrder);
+          }
+          if (Array.isArray(result.brandSettings.tripOrder)) {
+            setTripOrder(result.brandSettings.tripOrder);
+            tripOrderRef.current = result.brandSettings.tripOrder;
+          }
+          if (result.brandSettings.adminPassword) {
+            setAdminPassword(result.brandSettings.adminPassword);
+          }
+          saveBrandSettingsToFirestore(result.brandSettings);
+        }
+
+        // 3. Update React state immediately
+        userExplicitlySelectedRef.current = true;
+        setTrips(result.trips);
+        const targetId = result.targetTripId || result.trips[0].id;
+        setActiveTripId(targetId);
+        try {
+          localStorage.setItem(STORAGE_LAST_TRIP_KEY, targetId);
+          if (typeof window !== 'undefined') {
+            const url = new URL(window.location.href);
+            url.searchParams.set('trip', targetId);
+            window.history.replaceState({}, '', url.toString());
+          }
+        } catch {}
+
+        // 4. Safely sync to Firestore (lightweight data; photos detached to avoid 1MB document limit)
+        for (const trip of result.trips) {
+          saveTripToFirestore(trip);
+        }
+
+        // 5. Notify user
+        setToastMessage(result.message);
+        setTimeout(() => setToastMessage(null), 5000);
+      } catch (err: any) {
+        console.error('백업 복원 실패:', err);
+        setErrorToast({
+          message: err?.message || '백업 파일을 복원하는 중 오류가 발생했습니다.',
+          timestamp: Date.now()
+        });
+      }
+    };
+    reader.readAsText(file);
   };
 
   if (!isSiteUnlocked) {
@@ -820,6 +891,7 @@ export default function App() {
         tabOrder={tabOrder}
         onOpenBrandModal={handleRequestAdminModal}
         onOpenExportModal={() => setIsExportModalOpen(true)}
+        onRestoreBackup={handleRestoreBackup}
         onLockSite={() => setIsSiteUnlocked(false)}
         syncStatus={syncStatus}
         syncMessage={syncMessage}

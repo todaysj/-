@@ -211,9 +211,11 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">시작 시간 *</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 h-5 flex items-center">
+                  시작 시간 *
+                </label>
                 <input
                   type="time"
                   value={time}
@@ -224,11 +226,11 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <label className="block text-xs font-bold text-slate-700">
-                    종료 시간 <span className="text-slate-400 font-normal">(선택)</span>
+                <div className="flex items-center justify-between mb-1.5 h-5 whitespace-nowrap">
+                  <label className="text-xs font-bold text-slate-700 flex items-center">
+                    종료 시간
                   </label>
-                  <div className="flex items-center space-x-1">
+                  <div className="flex items-center space-x-1 shrink-0">
                     <button
                       type="button"
                       onClick={() => {
@@ -248,14 +250,14 @@ export const EventModal: React.FC<EventModalProps> = ({
                       onClick={() => {
                         const match = time.match(/^(\d{1,2}):(\d{2})$/);
                         if (match) {
-                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 60);
+                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 90);
                           setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
                         }
                       }}
                       className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
-                      title="시작 시간 기준 1시간 뒤로 설정"
+                      title="시작 시간 기준 90분(1시간 30분) 뒤로 설정"
                     >
-                      +1시간
+                      +90분
                     </button>
                   </div>
                 </div>
@@ -267,8 +269,10 @@ export const EventModal: React.FC<EventModalProps> = ({
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">카테고리</label>
+              <div className="col-span-2 sm:col-span-1">
+                <label className="block text-xs font-bold text-slate-700 mb-1.5 h-5 flex items-center">
+                  카테고리
+                </label>
                 <select
                   value={category}
                   onChange={(e) => setCategory(e.target.value as CategoryType)}

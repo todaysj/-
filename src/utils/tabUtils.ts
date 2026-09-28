@@ -118,17 +118,34 @@ export function getTripSouvenirTabs(trip: Trip): SouvenirTabConfig[] {
 
 /**
  * Smart Union of two lists of SouvenirItems by ID
+ * GUARANTEE: Never drops photos! If one item has photos and the other does not, preserves the photos.
  */
 export function unionSouvenirItems(listA: SouvenirItem[] = [], listB: SouvenirItem[] = []): SouvenirItem[] {
   const map = new Map<string, SouvenirItem>();
-  // listA has precedence for newer values
   for (const item of listA) {
-    if (item && item.id) map.set(item.id, item);
+    if (item && item.id) map.set(item.id, JSON.parse(JSON.stringify(item)));
   }
   for (const item of listB) {
-    if (item && item.id && !map.has(item.id)) {
-      map.set(item.id, item);
+    if (item && item.id) {
+      if (!map.has(item.id)) {
+        map.set(item.id, JSON.parse(JSON.stringify(item)));
+      } else {
+        const existing = map.get(item.id)!;
+        const hasExistingImages =
+          (existing.images && existing.images.length > 0 && existing.images.some((img) => img && img.trim() !== '')) ||
+          Boolean(existing.imageUrl && existing.imageUrl.trim() !== '');
+        const hasIncomingImages =
+          (item.images && item.images.length > 0 && item.images.some((img) => img && img.trim() !== '')) ||
+          Boolean(item.imageUrl && item.imageUrl.trim() !== '');
+
+        // If existing has no images but incoming has images, retain the images!
+        if (!hasExistingImages && hasIncomingImages) {
+          existing.images = item.images ? [...item.images] : (item.imageUrl ? [item.imageUrl] : []);
+          existing.imageUrl = item.imageUrl || existing.images[0];
+        }
+      }
     }
   }
   return Array.from(map.values());
 }
+

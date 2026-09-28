@@ -6,6 +6,7 @@ import { detachTripPhotos, resolveTripPhotos } from '../utils/imageUtils';
 import { getTripSouvenirTabs, getTripChecklistTabs, unionSouvenirItems, DEFAULT_PACKING_CATEGORIES, DEFAULT_SOUVENIR_TAGS } from '../utils/tabUtils';
 import { cleanTripTitle } from '../utils/dateUtils';
 import { saveTripBackup, saveTripsToIDB, getTripsFromIDB } from '../utils/tripIndexedDB';
+import { savePhotoLocal, generatePhotoId } from '../utils/photoStore';
 
 const TRIPS_COLLECTION = 'trips';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
@@ -124,6 +125,17 @@ export function notifyFirestoreError(userFriendlyMsg: string, rawError?: any) {
     setQuotaExceeded();
     return;
   }
+  // If Firestore size limit (1,048,576 bytes) is reached, seamlessly switch to local-first mode without error alert
+  if (
+    rawError?.message?.includes('exceeds the maximum allowed size') ||
+    rawError?.message?.includes('1,048,576') ||
+    userFriendlyMsg?.includes('1,048,576') ||
+    userFriendlyMsg?.includes('maximum allowed size')
+  ) {
+    console.warn('[TripService] Firestore document size limit reached. Safely preserving in LocalStorage and IndexedDB.');
+    updateSyncStatus('local-saved', '로컬 안전 저장 모드 (대용량 데이터 기기 내 안전 보관)');
+    return;
+  }
   console.error('상세 에러 (Firestore):', userFriendlyMsg, rawError);
   updateSyncStatus('error', userFriendlyMsg);
   firestoreErrorListeners.forEach((listener) => {
@@ -184,8 +196,10 @@ export function sanitizeForFirestore<T>(data: T): T {
 export function stripLargePayloadsForStorage(obj: any): any {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'string') {
-    if (obj.startsWith('data:image/') || (obj.startsWith('data:') && obj.length > 500)) {
-      return '';
+    if (obj.startsWith('data:image/')) {
+      const photoId = generatePhotoId(`ls_${Math.random().toString(36).substring(2, 9)}`);
+      savePhotoLocal(photoId, obj).catch(() => {});
+      return `photo://${photoId}`;
     }
     return obj;
   }
@@ -389,53 +403,35 @@ export function reconcileSingleTrip(localTrip: Trip | undefined, remoteTrip: Tri
   baseTrip.checklistTabs = mergedChecklistTabs;
   baseTrip.packingList = mergedChecklistTabs[0]?.items || [];
 
-  // 3. Schedule Items
-  if (isLocalPreferred) {
-    baseTrip.schedule = baseTrip.schedule || [];
-  } else {
-    const scheduleMap = new Map<string, ScheduleItem>();
-    for (const item of baseTrip.schedule || []) {
-      if (item?.id) scheduleMap.set(item.id, item);
-    }
-    for (const item of otherTrip.schedule || []) {
-      if (item?.id && !scheduleMap.has(item.id)) {
-        scheduleMap.set(item.id, item);
-      }
-    }
-    baseTrip.schedule = Array.from(scheduleMap.values());
+  // 3. Schedule Items: union both so no schedule items from either cloud or local are lost
+  const scheduleMap = new Map<string, ScheduleItem>();
+  for (const item of otherTrip.schedule || []) {
+    if (item?.id) scheduleMap.set(item.id, item);
   }
+  for (const item of baseTrip.schedule || []) {
+    if (item?.id) scheduleMap.set(item.id, item);
+  }
+  baseTrip.schedule = Array.from(scheduleMap.values());
 
-  // 4. Reservations
-  if (isLocalPreferred) {
-    baseTrip.reservations = baseTrip.reservations || [];
-  } else {
-    const resMap = new Map<string, Reservation>();
-    for (const item of baseTrip.reservations || []) {
-      if (item?.id) resMap.set(item.id, item);
-    }
-    for (const item of otherTrip.reservations || []) {
-      if (item?.id && !resMap.has(item.id)) {
-        resMap.set(item.id, item);
-      }
-    }
-    baseTrip.reservations = Array.from(resMap.values());
+  // 4. Reservations: union both
+  const resMap = new Map<string, Reservation>();
+  for (const item of otherTrip.reservations || []) {
+    if (item?.id) resMap.set(item.id, item);
   }
+  for (const item of baseTrip.reservations || []) {
+    if (item?.id) resMap.set(item.id, item);
+  }
+  baseTrip.reservations = Array.from(resMap.values());
 
-  // 5. Merge Expenses
-  if (isLocalPreferred) {
-    baseTrip.expenses = baseTrip.expenses || [];
-  } else {
-    const expMap = new Map<string, ExpenseItem>();
-    for (const item of baseTrip.expenses || []) {
-      if (item?.id) expMap.set(item.id, item);
-    }
-    for (const item of otherTrip.expenses || []) {
-      if (item?.id && !expMap.has(item.id)) {
-        expMap.set(item.id, item);
-      }
-    }
-    baseTrip.expenses = Array.from(expMap.values());
+  // 5. Merge Expenses: union both
+  const expMap = new Map<string, ExpenseItem>();
+  for (const item of otherTrip.expenses || []) {
+    if (item?.id) expMap.set(item.id, item);
   }
+  for (const item of baseTrip.expenses || []) {
+    if (item?.id) expMap.set(item.id, item);
+  }
+  baseTrip.expenses = Array.from(expMap.values());
 
   return baseTrip;
 }
@@ -507,24 +503,28 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     }
   }, 1200);
 
-  // 4. Prepare clean trip: upload photos only if base64 images exist
+  // 4. Prepare clean, lightweight trip: extract all heavy photos to separate storage
   let cleanTrip: Trip;
   try {
-    if (hasBase64Images(timestampedTrip)) {
-      const detachPromise = detachTripPhotos(timestampedTrip);
-      const detachTimeout = new Promise<Trip>((resolve) =>
-        setTimeout(() => resolve(timestampedTrip), 800)
-      );
-      const detached = await Promise.race([detachPromise, detachTimeout]);
-      cleanTrip = sanitizeForFirestore(detached);
-    } else {
-      cleanTrip = sanitizeForFirestore(timestampedTrip);
-    }
+    cleanTrip = await detachTripPhotos(timestampedTrip);
   } catch (e) {
-    cleanTrip = sanitizeForFirestore(timestampedTrip);
+    console.warn('detachTripPhotos fallback:', e);
+    cleanTrip = timestampedTrip;
+  }
+  const safePayload = sanitizeForFirestore(cleanTrip);
+
+  // 5. Size safeguard: check document size before sending to Firestore (must be under 1,048,576 bytes)
+  const payloadStr = JSON.stringify(safePayload);
+  const byteLength = new TextEncoder().encode(payloadStr).length;
+  if (byteLength > 750_000) {
+    console.warn(`[TripService] Trip payload (${byteLength} bytes) is near 1MB Firestore limit. Safely preserved in LocalStorage & IndexedDB.`);
+    clearTimeout(watchdog);
+    pendingTripWrites.delete(cleanTrip.id);
+    updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
+    return;
   }
 
-  // 5. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
+  // 6. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
@@ -538,7 +538,6 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
       return;
     }
 
-    const safePayload = sanitizeForFirestore(cleanTrip);
     const payloadHash = JSON.stringify(safePayload);
     if (lastWrittenTripHash.get(cleanTrip.id) === payloadHash) {
       clearTimeout(watchdog);
@@ -552,6 +551,9 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
       writePromise.catch((err) => {
         if (isQuotaError(err)) {
           setQuotaExceeded();
+        } else if (err?.message?.includes('exceeds the maximum allowed size') || err?.code === 'invalid-argument') {
+          console.warn('[TripService] Document size error in background write:', err);
+          updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
         } else {
           console.warn('Background Firestore write:', err);
         }
@@ -563,12 +565,17 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
       clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
+      clearTimeout(watchdog);
       if (isQuotaError(err)) {
         setQuotaExceeded();
         return;
       }
+      if (err?.message?.includes('exceeds the maximum allowed size') || err?.code === 'invalid-argument') {
+        console.warn('[TripService] Caught 1MB document size error:', err);
+        updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
+        return;
+      }
       console.error('상세 에러 (Firestore setDoc):', err);
-      clearTimeout(watchdog);
       // Since data is already 100% saved in browser cache and IndexedDB, ensure status transitions
       updateSyncStatus('synced', '실시간 동기화됨');
     } finally {
@@ -693,7 +700,7 @@ export function subscribeToTrips(
             const isLocalNewerOrEqual = (local?.updatedAt || 0) >= (remote.updatedAt || 0);
             const chosen = local && (isLocalNewerOrEqual || pendingTripWrites.has(remote.id))
               ? reconcileSingleTrip(local, remote)
-              : remote;
+              : reconcileSingleTrip(remote, local);
             finalTrips.push({
               ...chosen,
               title: cleanTripTitle(chosen.title)

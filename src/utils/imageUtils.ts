@@ -95,8 +95,35 @@ export async function compressImage(
 }
 
 /**
+ * Recursively detaches any remaining base64 data URLs from an object or array,
+ * saving them to the separate photoStore and replacing them with photo://${photoId}.
+ */
+function deepDetachBase64(obj: any, tripId: string): any {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') {
+    if (obj.startsWith('data:image/')) {
+      const photoId = generatePhotoId(`${tripId}_item_${Math.random().toString(36).substring(2, 8)}`);
+      savePhotoLocal(photoId, obj).catch(() => {});
+      return `photo://${photoId}`;
+    }
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map((item) => deepDetachBase64(item, tripId));
+  }
+  if (typeof obj === 'object') {
+    const res: Record<string, any> = {};
+    for (const key of Object.keys(obj)) {
+      res[key] = deepDetachBase64(obj[key], tripId);
+    }
+    return res;
+  }
+  return obj;
+}
+
+/**
  * Optimizes Trip payload for Firestore.
- * Saves large base64 photos to Firestore `photos/{photoId}` collection and local IndexedDB,
+ * Saves large base64 photos to separate `photos/{photoId}` collection and local IndexedDB,
  * storing lightweight `photo://${photoId}` references in the Trip document.
  * This guarantees the Trip document never exceeds Firestore's 1MB limit and syncs seamlessly across all devices.
  */
@@ -111,7 +138,7 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     delete (cloned as any).packingList;
   }
 
-  // 2. Process souvenir items: detach base64 photos to photo:// links & save to Firestore photos collection
+  // 2. Process souvenir items: detach base64 photos to photo:// links & save to separate photo storage
   if (cloned.souvenirTabs && Array.isArray(cloned.souvenirTabs)) {
     for (const tab of cloned.souvenirTabs) {
       if (tab.items && Array.isArray(tab.items)) {
@@ -158,6 +185,32 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     }
   }
 
+  // Legacy souvenirs array if present
+  if ((cloned as any).souvenirs && Array.isArray((cloned as any).souvenirs)) {
+    for (const item of (cloned as any).souvenirs) {
+      if (item?.images && Array.isArray(item.images)) {
+        const processedImages: string[] = [];
+        for (let idx = 0; idx < item.images.length; idx++) {
+          const img = item.images[idx];
+          if (typeof img === 'string' && img.startsWith('data:image/')) {
+            const photoId = generatePhotoId(`${trip.id}_leg_${item.id}_${idx}`);
+            await savePhotoLocal(photoId, img);
+            processedImages.push(`photo://${photoId}`);
+          } else if (typeof img === 'string') {
+            processedImages.push(img);
+          }
+        }
+        item.images = processedImages;
+        if (processedImages.length > 0) item.imageUrl = processedImages[0];
+      } else if (item?.imageUrl && typeof item.imageUrl === 'string' && item.imageUrl.startsWith('data:image/')) {
+        const photoId = generatePhotoId(`${trip.id}_leg_${item.id}_0`);
+        await savePhotoLocal(photoId, item.imageUrl);
+        item.imageUrl = `photo://${photoId}`;
+        item.images = [`photo://${photoId}`];
+      }
+    }
+  }
+
   // 3. Process cover image
   if (cloned.coverImage && typeof cloned.coverImage === 'string') {
     if (cloned.coverImage.startsWith('data:image/')) {
@@ -167,7 +220,24 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     }
   }
 
-  return cloned;
+  // 4. Process reservations (qrCodeUrl, fileUrl)
+  if (cloned.reservations && Array.isArray(cloned.reservations)) {
+    for (const res of cloned.reservations) {
+      if (res.qrCodeUrl && typeof res.qrCodeUrl === 'string' && res.qrCodeUrl.startsWith('data:image/')) {
+        const photoId = generatePhotoId(`${trip.id}_res_qr_${res.id}`);
+        await savePhotoLocal(photoId, res.qrCodeUrl);
+        res.qrCodeUrl = `photo://${photoId}`;
+      }
+      if (res.fileUrl && typeof res.fileUrl === 'string' && res.fileUrl.startsWith('data:image/')) {
+        const photoId = generatePhotoId(`${trip.id}_res_file_${res.id}`);
+        await savePhotoLocal(photoId, res.fileUrl);
+        res.fileUrl = `photo://${photoId}`;
+      }
+    }
+  }
+
+  // 5. Deep scan catch-all: guarantees 0 base64 images ever remain in the trip document
+  return deepDetachBase64(cloned, trip.id);
 }
 
 /**
@@ -190,21 +260,63 @@ export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
     for (const tab of cloned.souvenirTabs) {
       if (tab.items && Array.isArray(tab.items)) {
         for (const item of tab.items) {
-          if (item.images && Array.isArray(item.images)) {
+          if (item.images && Array.isArray(item.images) && item.images.length > 0) {
             const resolvedList = await Promise.all(
-              item.images.map((img) => resolveImageStr(img))
+              item.images.map(async (img) => {
+                if (typeof img === 'string' && img.startsWith('photo://')) {
+                  const resolved = await getPhotoLocal(img, item.id, item.title);
+                  return resolved || img;
+                }
+                return img;
+              })
             );
             item.images = resolvedList;
             if (resolvedList.length > 0) {
               item.imageUrl = resolvedList[0];
-            } else {
-              delete item.imageUrl;
             }
           } else if (item.imageUrl) {
-            const resolved = await resolveImageStr(item.imageUrl);
-            item.imageUrl = resolved;
-            item.images = [resolved];
+            if (typeof item.imageUrl === 'string' && item.imageUrl.startsWith('photo://')) {
+              const resolved = await getPhotoLocal(item.imageUrl, item.id, item.title);
+              item.imageUrl = resolved || item.imageUrl;
+              item.images = [item.imageUrl];
+            }
+          } else {
+            // Completely missing images: attempt recovery
+            const recovered = await getPhotoLocal('', item.id, item.title);
+            if (recovered) {
+              item.imageUrl = recovered;
+              item.images = [recovered];
+            }
           }
+        }
+      }
+    }
+  }
+
+  // Legacy souvenirs array if present
+  if ((cloned as any).souvenirs && Array.isArray((cloned as any).souvenirs)) {
+    for (const item of (cloned as any).souvenirs) {
+      if (item.images && Array.isArray(item.images) && item.images.length > 0) {
+        const resolvedList = await Promise.all(
+          item.images.map(async (img: string) => {
+            if (typeof img === 'string' && img.startsWith('photo://')) {
+              const resolved = await getPhotoLocal(img, item.id, item.title);
+              return resolved || img;
+            }
+            return img;
+          })
+        );
+        item.images = resolvedList;
+        if (resolvedList.length > 0) item.imageUrl = resolvedList[0];
+      } else if (item.imageUrl && typeof item.imageUrl === 'string' && item.imageUrl.startsWith('photo://')) {
+        const resolved = await getPhotoLocal(item.imageUrl, item.id, item.title);
+        item.imageUrl = resolved || item.imageUrl;
+        item.images = [item.imageUrl];
+      } else if (!item.imageUrl && (!item.images || item.images.length === 0)) {
+        const recovered = await getPhotoLocal('', item.id, item.title);
+        if (recovered) {
+          item.imageUrl = recovered;
+          item.images = [recovered];
         }
       }
     }
@@ -212,6 +324,17 @@ export async function resolveTripPhotos(trip: Trip): Promise<Trip> {
 
   if (cloned.coverImage) {
     cloned.coverImage = await resolveImageStr(cloned.coverImage);
+  }
+
+  if (cloned.reservations && Array.isArray(cloned.reservations)) {
+    for (const res of cloned.reservations) {
+      if (res.qrCodeUrl && res.qrCodeUrl.startsWith('photo://')) {
+        res.qrCodeUrl = await resolveImageStr(res.qrCodeUrl);
+      }
+      if (res.fileUrl && res.fileUrl.startsWith('photo://')) {
+        res.fileUrl = await resolveImageStr(res.fileUrl);
+      }
+    }
   }
 
   return cloned;

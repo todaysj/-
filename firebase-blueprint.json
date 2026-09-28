@@ -6,6 +6,13 @@
       "type": "collection",
       "params": {},
       "examples": []
+    },
+    "photos": {
+      "title": "Trip Photos",
+      "description": "Separately stored travel photos and souvenir images detached from trip documents",
+      "type": "collection",
+      "params": {},
+      "examples": []
     }
   }
 }

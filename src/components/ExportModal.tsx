@@ -25,6 +25,7 @@ import {
   exportTripAsJSONFile,
   generateTripMarkdown
 } from '../utils/exportUtils';
+import { parseTripBackup } from '../utils/backupUtils';
 import html2pdf from 'html2pdf.js';
 
 interface ExportModalProps {
@@ -416,17 +417,12 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const json = JSON.parse(event.target?.result as string);
-        if (!json.title || !json.schedule || !Array.isArray(json.schedule)) {
-          throw new Error('올바른 J플래너 일정 데이터 형식이 아닙니다.');
-        }
-        const imported: Trip = {
-          ...json,
-          id: json.id || `imported-${Date.now()}`
-        };
-        if (onImportTrip) {
-          onImportTrip(imported);
-          alert(`'${imported.title}' 여행 일정을 성공적으로 불러왔습니다!`);
+        const text = event.target?.result as string;
+        const result = parseTripBackup(text);
+        if (onImportTrip && result.trips.length > 0) {
+          const target = result.trips.find((t) => t.id === result.targetTripId) || result.trips[0];
+          onImportTrip(target);
+          alert(result.message);
           onClose();
         }
       } catch (err: any) {

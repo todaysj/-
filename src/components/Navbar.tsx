@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { Trip, TabType } from '../types';
-import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
+import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Upload, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
 import { getTripChecklistTabs, getTripSouvenirTabs } from '../utils/tabUtils';
 import { cleanTripTitle } from '../utils/dateUtils';
 import { SyncStatus } from '../lib/tripService';
@@ -22,6 +22,7 @@ interface NavbarProps {
   tabOrder?: TabType[];
   onOpenBrandModal: () => void;
   onOpenExportModal: () => void;
+  onRestoreBackup?: (file: File) => void;
   onLockSite?: () => void;
   syncStatus?: SyncStatus;
   syncMessage?: string;
@@ -46,10 +47,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   tabOrder = DEFAULT_NAV_TABS,
   onOpenBrandModal,
   onOpenExportModal,
+  onRestoreBackup,
   onLockSite,
   syncStatus = 'synced',
   syncMessage
 }) => {
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleUploadClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && onRestoreBackup) {
+      onRestoreBackup(file);
+    }
+    e.target.value = '';
+  };
+
   const checklistTabs = getTripChecklistTabs(activeTrip);
   const souvenirTabs = getTripSouvenirTabs(activeTrip);
 
@@ -455,6 +471,28 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <Download className="w-3.5 h-3.5" />
                 <span className="hidden xs:inline">일정</span><span>파일 저장</span>
               </button>
+
+              {/* Import / Restore JSON Backup Button */}
+              {onRestoreBackup && (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={handleFileChange}
+                  />
+                  <button
+                    onClick={handleUploadClick}
+                    className="inline-flex items-center space-x-1 sm:space-x-1.5 px-2.5 sm:px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl transition shadow-sm whitespace-nowrap shrink-0 cursor-pointer"
+                    title="컴퓨터의 trip-backup.json 파일 선택 (32개 일정 및 전체 데이터 즉시 복원)"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">데이터 불러오기(JSON 업로드)</span>
+                    <span className="sm:hidden">데이터 불러오기</span>
+                  </button>
+                </>
+              )}
 
               {/* Admin / Brand & Tab Order Edit Button */}
               <button

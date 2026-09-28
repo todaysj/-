@@ -35,7 +35,7 @@ import {
   Palette
 } from 'lucide-react';
 import { getTripSouvenirTabs, DEFAULT_SOUVENIR_TAGS, TAG_COLOR_PALETTE, DEFAULT_TAG_COLORS, getTagColorInfo } from '../utils/tabUtils';
-import { getPhotoLocal } from '../utils/photoStore';
+import { getPhotoLocal, getPhotoByItemOrFallback, recoverAllTripPhotos } from '../utils/photoStore';
 import {
   getTripBackups,
   autoRecoverTabSouvenirs,
@@ -45,54 +45,94 @@ import {
 } from '../utils/tripIndexedDB';
 
 const AsyncSouvenirImg: React.FC<{
-  src: string;
+  src?: string;
   alt?: string;
   className?: string;
-}> = ({ src, alt, className }) => {
+  itemId?: string;
+  itemTitle?: string;
+}> = ({ src, alt, className, itemId, itemTitle }) => {
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => {
     if (src && !src.startsWith('photo://')) return src;
     return '';
   });
-  const [isResolving, setIsResolving] = useState<boolean>(() => Boolean(src && src.startsWith('photo://')));
+  const [isResolving, setIsResolving] = useState<boolean>(() => Boolean((src && src.startsWith('photo://')) || (!src && (itemId || itemTitle))));
+  const [hasFailed, setHasFailed] = useState<boolean>(false);
 
   useEffect(() => {
     let isMounted = true;
+    setHasFailed(false);
+
     if (!src) {
-      setResolvedSrc('');
-      setIsResolving(false);
+      if (itemId || itemTitle) {
+        setIsResolving(true);
+        getPhotoByItemOrFallback('', itemId, itemTitle).then((found) => {
+          if (isMounted) {
+            if (found) {
+              setResolvedSrc(found);
+              setHasFailed(false);
+            } else {
+              setHasFailed(true);
+            }
+            setIsResolving(false);
+          }
+        }).catch(() => {
+          if (isMounted) {
+            setHasFailed(true);
+            setIsResolving(false);
+          }
+        });
+      } else {
+        setResolvedSrc('');
+        setIsResolving(false);
+        setHasFailed(true);
+      }
       return;
     }
+
     if (src.startsWith('photo://')) {
       setIsResolving(true);
-      getPhotoLocal(src).then((dataUrl) => {
+      getPhotoLocal(src, itemId, itemTitle).then((dataUrl) => {
         if (isMounted) {
           if (dataUrl) {
             setResolvedSrc(dataUrl);
+            setHasFailed(false);
+          } else {
+            setHasFailed(true);
           }
           setIsResolving(false);
         }
       }).catch(() => {
-        if (isMounted) setIsResolving(false);
+        if (isMounted) {
+          setHasFailed(true);
+          setIsResolving(false);
+        }
       });
     } else {
       setResolvedSrc(src);
       setIsResolving(false);
+      setHasFailed(false);
     }
+
     return () => {
       isMounted = false;
     };
-  }, [src]);
+  }, [src, itemId, itemTitle]);
 
-  if (isResolving || (!resolvedSrc && src)) {
+  if (isResolving) {
     return (
       <div className={`flex items-center justify-center bg-slate-100 ${className || ''}`}>
-        <div className="w-5 h-5 border-2 border-slate-300 border-t-amber-500 rounded-full animate-spin" />
+        <div className="w-5 h-5 border-2 border-slate-300 border-t-pink-500 rounded-full animate-spin" />
       </div>
     );
   }
 
-  if (!resolvedSrc) {
-    return <div className={`bg-slate-100 ${className || ''}`} />;
+  if (hasFailed || !resolvedSrc) {
+    return (
+      <div className={`flex flex-col items-center justify-center bg-slate-50 text-slate-300 p-2 ${className || ''}`}>
+        <ImageIcon className="w-6 h-6 stroke-[1.5] text-slate-300 mb-1" />
+        <span className="text-[10px] font-medium text-slate-400">사진 준비 중</span>
+      </div>
+    );
   }
 
   return (
@@ -101,6 +141,19 @@ const AsyncSouvenirImg: React.FC<{
       alt={alt || ''}
       referrerPolicy="no-referrer"
       className={className}
+      onError={() => {
+        if (itemId || itemTitle) {
+          getPhotoByItemOrFallback('', itemId, itemTitle).then((fallback) => {
+            if (fallback && fallback !== resolvedSrc) {
+              setResolvedSrc(fallback);
+            } else {
+              setHasFailed(true);
+            }
+          }).catch(() => setHasFailed(true));
+        } else {
+          setHasFailed(true);
+        }
+      }}
     />
   );
 };
@@ -181,29 +234,33 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
 
-  // Auto-resolve any photo:// references into full HD images
+  // Auto-resolve any photo:// references and auto-recover missing photos from backups/cache
   useEffect(() => {
     let isMounted = true;
-    const hasPhotoUris = trip.souvenirTabs?.some((tab) =>
-      tab.items?.some(
-        (item) =>
-          item.images?.some((img) => typeof img === 'string' && img.startsWith('photo://')) ||
-          (typeof item.imageUrl === 'string' && item.imageUrl.startsWith('photo://'))
-      )
-    );
 
-    if (hasPhotoUris) {
-      resolveTripPhotos(trip).then((resolved) => {
-        if (isMounted && resolved) {
+    // 1. Resolve photo:// references to full HD images
+    resolveTripPhotos(trip).then((resolved) => {
+      if (isMounted && resolved) {
+        const hasDiff = JSON.stringify(resolved) !== JSON.stringify(trip);
+        if (hasDiff) {
           onUpdateTrip(resolved);
         }
-      });
-    }
+      }
+    });
+
+    // 2. Scan and recover any lost photos from IndexedDB backups, cache, and photoStore
+    recoverAllTripPhotos(trip).then(({ trip: recoveredTrip, recoveredCount }) => {
+      if (isMounted && recoveredCount > 0) {
+        onUpdateTrip(recoveredTrip);
+        setRecoveryBanner(`기념품 사진 ${recoveredCount}장이 캐시/백업에서 성공적으로 복구되었습니다.`);
+        setTimeout(() => setRecoveryBanner(null), 5000);
+      }
+    });
 
     return () => {
       isMounted = false;
     };
-  }, [trip.id, currentTab.id]);
+  }, [trip.id]);
 
   // Open Backup & History Modal
   const handleOpenBackupModal = async () => {
@@ -241,6 +298,24 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
         setRecoveryBanner(`누락된 ${recoveredCount}개 항목이 복구되었습니다.`);
       } else {
         alert('모든 항목이 최신 상태입니다.');
+      }
+      setIsBackupModalOpen(false);
+      setTimeout(() => setRecoveryBanner(null), 5000);
+    } finally {
+      setIsLoadingBackups(false);
+    }
+  };
+
+  // Run full photo auto-recovery across all tabs
+  const handleTriggerPhotoRecover = async () => {
+    setIsLoadingBackups(true);
+    try {
+      const { trip: recoveredTrip, recoveredCount } = await recoverAllTripPhotos(trip);
+      if (recoveredCount > 0) {
+        onUpdateTrip(recoveredTrip);
+        setRecoveryBanner(`기념품 사진 ${recoveredCount}장이 캐시/백업에서 성공적으로 복구되었습니다.`);
+      } else {
+        alert('모든 사진이 이미 정상 표시되고 있거나 최신 상태입니다.');
       }
       setIsBackupModalOpen(false);
       setTimeout(() => setRecoveryBanner(null), 5000);
@@ -1076,6 +1151,8 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                           <AsyncSouvenirImg
                             src={itemImages[0]}
                             alt={item.title}
+                            itemId={item.id}
+                            itemTitle={item.title}
                             className={`w-full h-full object-cover transition duration-300 group-hover/img:scale-105 ${
                               item.isPurchased ? 'grayscale-[30%] opacity-90' : ''
                             }`}
@@ -1097,6 +1174,8 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                               <AsyncSouvenirImg
                                 src={imgUrl}
                                 alt={`${item.title} - ${imgIdx + 1}`}
+                                itemId={item.id}
+                                itemTitle={item.title}
                                 className={`w-full h-full object-cover transition duration-300 group-hover/img:scale-105 ${
                                   item.isPurchased ? 'grayscale-[30%] opacity-90' : ''
                                 }`}
@@ -2058,7 +2137,10 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
               <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3">
                 <div className="flex items-center space-x-2.5">
                   <RotateCcw className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span className="text-xs font-bold text-slate-700">누락 항목 복구</span>
+                  <div>
+                    <span className="text-xs font-bold text-slate-700 block">누락 항목 복구</span>
+                    <span className="text-[10px] text-slate-400">삭제되었거나 누락된 항목을 복원합니다.</span>
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -2066,7 +2148,26 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                   disabled={isLoadingBackups}
                   className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-xl shadow-sm transition shrink-0 cursor-pointer"
                 >
-                  복구 실행
+                  항목 복구
+                </button>
+              </div>
+
+              {/* Auto-Recover Lost Photos Action */}
+              <div className="p-3.5 rounded-2xl bg-pink-50/50 border border-pink-200/80 flex items-center justify-between gap-3">
+                <div className="flex items-center space-x-2.5">
+                  <Camera className="w-4 h-4 text-pink-600 shrink-0" />
+                  <div>
+                    <span className="text-xs font-bold text-slate-800 block">기념품 사진 전체 복구</span>
+                    <span className="text-[10px] text-slate-500">브라우저 캐시, IndexedDB, 백업에서 사진을 찾아 연결합니다.</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleTriggerPhotoRecover}
+                  disabled={isLoadingBackups}
+                  className="px-3.5 py-2 bg-gradient-to-r from-pink-500 to-rose-600 hover:from-pink-600 hover:to-rose-700 text-white font-bold text-xs rounded-xl shadow-sm transition shrink-0 cursor-pointer"
+                >
+                  사진 복구
                 </button>
               </div>
 
