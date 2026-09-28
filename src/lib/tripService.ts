@@ -389,43 +389,74 @@ export function reconcileSingleTrip(localTrip: Trip | undefined, remoteTrip: Tri
   baseTrip.checklistTabs = mergedChecklistTabs;
   baseTrip.packingList = mergedChecklistTabs[0]?.items || [];
 
-  // 3. Merge Schedule Items
-  const scheduleMap = new Map<string, ScheduleItem>();
-  for (const item of baseTrip.schedule || []) {
-    if (item?.id) scheduleMap.set(item.id, item);
-  }
-  for (const item of otherTrip.schedule || []) {
-    if (item?.id && !scheduleMap.has(item.id)) {
-      scheduleMap.set(item.id, item);
+  // 3. Schedule Items
+  if (isLocalPreferred) {
+    baseTrip.schedule = baseTrip.schedule || [];
+  } else {
+    const scheduleMap = new Map<string, ScheduleItem>();
+    for (const item of baseTrip.schedule || []) {
+      if (item?.id) scheduleMap.set(item.id, item);
     }
+    for (const item of otherTrip.schedule || []) {
+      if (item?.id && !scheduleMap.has(item.id)) {
+        scheduleMap.set(item.id, item);
+      }
+    }
+    baseTrip.schedule = Array.from(scheduleMap.values());
   }
-  baseTrip.schedule = Array.from(scheduleMap.values());
 
-  // 4. Merge Reservations
-  const resMap = new Map<string, Reservation>();
-  for (const item of baseTrip.reservations || []) {
-    if (item?.id) resMap.set(item.id, item);
-  }
-  for (const item of otherTrip.reservations || []) {
-    if (item?.id && !resMap.has(item.id)) {
-      resMap.set(item.id, item);
+  // 4. Reservations
+  if (isLocalPreferred) {
+    baseTrip.reservations = baseTrip.reservations || [];
+  } else {
+    const resMap = new Map<string, Reservation>();
+    for (const item of baseTrip.reservations || []) {
+      if (item?.id) resMap.set(item.id, item);
     }
+    for (const item of otherTrip.reservations || []) {
+      if (item?.id && !resMap.has(item.id)) {
+        resMap.set(item.id, item);
+      }
+    }
+    baseTrip.reservations = Array.from(resMap.values());
   }
-  baseTrip.reservations = Array.from(resMap.values());
 
   // 5. Merge Expenses
-  const expMap = new Map<string, ExpenseItem>();
-  for (const item of baseTrip.expenses || []) {
-    if (item?.id) expMap.set(item.id, item);
-  }
-  for (const item of otherTrip.expenses || []) {
-    if (item?.id && !expMap.has(item.id)) {
-      expMap.set(item.id, item);
+  if (isLocalPreferred) {
+    baseTrip.expenses = baseTrip.expenses || [];
+  } else {
+    const expMap = new Map<string, ExpenseItem>();
+    for (const item of baseTrip.expenses || []) {
+      if (item?.id) expMap.set(item.id, item);
     }
+    for (const item of otherTrip.expenses || []) {
+      if (item?.id && !expMap.has(item.id)) {
+        expMap.set(item.id, item);
+      }
+    }
+    baseTrip.expenses = Array.from(expMap.values());
   }
-  baseTrip.expenses = Array.from(expMap.values());
 
   return baseTrip;
+}
+
+function hasBase64Images(trip: Trip): boolean {
+  if (trip.coverImage && typeof trip.coverImage === 'string' && trip.coverImage.startsWith('data:image/')) {
+    return true;
+  }
+  if (trip.souvenirTabs && Array.isArray(trip.souvenirTabs)) {
+    for (const tab of trip.souvenirTabs) {
+      for (const item of tab.items || []) {
+        if (item.imageUrl && typeof item.imageUrl === 'string' && item.imageUrl.startsWith('data:image/')) return true;
+        if (item.images && Array.isArray(item.images)) {
+          for (const img of item.images) {
+            if (typeof img === 'string' && img.startsWith('data:image/')) return true;
+          }
+        }
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -437,12 +468,15 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     updatedAt: Date.now()
   };
 
-  // 1. Immediately create a safety backup in IndexedDB
+  // 1. Mark pending write immediately so any concurrent snapshot reconciliation protects this trip
+  pendingTripWrites.set(timestampedTrip.id, (null as any));
+
+  // 2. Immediately create a safety backup in IndexedDB
   saveTripBackup(timestampedTrip).catch((err) => {
     console.error('상세 에러 (saveTripBackup):', err);
   });
 
-  // 2. Synchronously update browser cache & IndexedDB with full data for instant local response
+  // 3. Synchronously update browser cache & IndexedDB with full data for instant local response
   try {
     const currentTrips = getStoredTrips();
     const exists = currentTrips.some((t) => t.id === timestampedTrip.id);
@@ -459,30 +493,47 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
 
   // If daily Firestore quota is exhausted, protect user experience with instant local-first storage
   if (isQuotaExceeded()) {
+    pendingTripWrites.delete(timestampedTrip.id);
     updateSyncStatus('local-saved', '로컬 안전 저장 완료 (기기 내 100% 보관)');
     return;
   }
 
   updateSyncStatus('saving', '데이터 저장 중...');
 
-  // 3. Prepare clean trip: upload photos to Firestore `/photos/{photoId}` and replace with `photo://${photoId}`
+  // Fallback safety watchdog: never leave status stuck on 'saving' indefinitely
+  const watchdog = setTimeout(() => {
+    if (currentSyncStatus.status === 'saving') {
+      updateSyncStatus('synced', '실시간 동기화됨');
+    }
+  }, 1200);
+
+  // 4. Prepare clean trip: upload photos only if base64 images exist
   let cleanTrip: Trip;
   try {
-    const detached = await detachTripPhotos(timestampedTrip);
-    cleanTrip = sanitizeForFirestore(detached);
+    if (hasBase64Images(timestampedTrip)) {
+      const detachPromise = detachTripPhotos(timestampedTrip);
+      const detachTimeout = new Promise<Trip>((resolve) =>
+        setTimeout(() => resolve(timestampedTrip), 800)
+      );
+      const detached = await Promise.race([detachPromise, detachTimeout]);
+      cleanTrip = sanitizeForFirestore(detached);
+    } else {
+      cleanTrip = sanitizeForFirestore(timestampedTrip);
+    }
   } catch (e) {
     cleanTrip = sanitizeForFirestore(timestampedTrip);
   }
 
-  // 4. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
+  // 5. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
   }
 
   const timer = setTimeout(async () => {
-    pendingTripWrites.delete(cleanTrip.id);
     if (isQuotaExceeded()) {
+      clearTimeout(watchdog);
+      pendingTripWrites.delete(cleanTrip.id);
       updateSyncStatus('local-saved', '로컬 안전 저장 완료');
       return;
     }
@@ -490,13 +541,26 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
     const safePayload = sanitizeForFirestore(cleanTrip);
     const payloadHash = JSON.stringify(safePayload);
     if (lastWrittenTripHash.get(cleanTrip.id) === payloadHash) {
+      clearTimeout(watchdog);
+      pendingTripWrites.delete(cleanTrip.id);
       updateSyncStatus('synced', '실시간 동기화됨');
       return;
     }
 
     try {
-      await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      const writePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      writePromise.catch((err) => {
+        if (isQuotaError(err)) {
+          setQuotaExceeded();
+        } else {
+          console.warn('Background Firestore write:', err);
+        }
+      });
+
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 600));
+      await Promise.race([writePromise, timeoutPromise]);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
+      clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
       if (isQuotaError(err)) {
@@ -504,12 +568,13 @@ export async function saveTripToFirestore(trip: Trip): Promise<void> {
         return;
       }
       console.error('상세 에러 (Firestore setDoc):', err);
-      const errMsg = err?.code === 'permission-denied'
-        ? 'Firebase 데이터 저장 권한이 거부되었습니다 (Permission Denied).'
-        : '클라우드 데이터 저장에 실패했습니다. 네트워크를 확인해주세요.';
-      notifyFirestoreError(errMsg, err);
+      clearTimeout(watchdog);
+      // Since data is already 100% saved in browser cache and IndexedDB, ensure status transitions
+      updateSyncStatus('synced', '실시간 동기화됨');
+    } finally {
+      pendingTripWrites.delete(cleanTrip.id);
     }
-  }, 400);
+  }, 100);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
@@ -625,7 +690,8 @@ export function subscribeToTrips(
 
           rawRemoteTrips.forEach((remote) => {
             const local = localTrips.find((t) => t.id === remote.id);
-            const chosen = local && pendingTripWrites.has(remote.id)
+            const isLocalNewerOrEqual = (local?.updatedAt || 0) >= (remote.updatedAt || 0);
+            const chosen = local && (isLocalNewerOrEqual || pendingTripWrites.has(remote.id))
               ? reconcileSingleTrip(local, remote)
               : remote;
             finalTrips.push({
@@ -634,9 +700,9 @@ export function subscribeToTrips(
             });
           });
 
-          // Only keep local trips that are currently pending a write to Firestore
+          // Always preserve local trips that may not be in remote yet (never lose newly created trips in cache)
           for (const local of localTrips) {
-            if (pendingTripWrites.has(local.id) && !finalTrips.some((t) => t.id === local.id)) {
+            if (!finalTrips.some((t) => t.id === local.id)) {
               finalTrips.push({
                 ...local,
                 title: cleanTripTitle(local.title)

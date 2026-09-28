@@ -284,13 +284,16 @@ export default function App() {
 
   // Helper to update active trip locally & persist to Firestore
   const updateActiveTrip = (updater: (trip: Trip) => Trip) => {
+    let nextUpdatedTrip: Trip | null = null;
     setTrips((prevTrips) => {
       const current = prevTrips.find((t) => t.id === activeTripId) || prevTrips[0];
       if (!current) return prevTrips;
-      const updatedTrip = { ...updater(current), updatedAt: Date.now() };
-      saveTripToFirestore(updatedTrip);
-      return prevTrips.map((t) => (t.id === current.id ? updatedTrip : t));
+      nextUpdatedTrip = { ...updater(current), updatedAt: Date.now() };
+      return prevTrips.map((t) => (t.id === current.id ? nextUpdatedTrip! : t));
     });
+    if (nextUpdatedTrip) {
+      saveTripToFirestore(nextUpdatedTrip);
+    }
   };
 
   // Brand Header & Tab Order Handlers
@@ -395,6 +398,7 @@ export default function App() {
     insertAfterId?: string,
     shiftSubsequent: boolean = true
   ) => {
+    let shiftedCount = 0;
     updateActiveTrip((trip) => {
       const exists = trip.schedule.some((s) => s.id === savedItem.id);
       let newSchedule: ScheduleItem[];
@@ -416,16 +420,10 @@ export default function App() {
       }
 
       // Auto-shift subsequent schedules if enabled
-      let shiftedCount = 0;
       if (shiftSubsequent) {
         const result = adjustSubsequentSchedules(newSchedule, savedItem, insertAfterId);
         newSchedule = result.updatedSchedule;
         shiftedCount = result.shiftedCount;
-      }
-
-      if (shiftedCount > 0) {
-        setToastMessage(`일정이 저장되고, 뒤의 ${shiftedCount}개 일정이 자동 순연되었습니다.`);
-        setTimeout(() => setToastMessage(null), 3500);
       }
 
       // 🌟 Synchronize schedule item cost to Budget & Expenses (예산 & 가계부 연동)
@@ -484,6 +482,10 @@ export default function App() {
         expenses: updatedExpenses
       };
     });
+    if (shiftedCount > 0) {
+      setToastMessage(`일정이 저장되고, 뒤의 ${shiftedCount}개 일정이 자동 순연되었습니다.`);
+      setTimeout(() => setToastMessage(null), 3500);
+    }
   };
 
   // Custom Currency Handler

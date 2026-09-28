@@ -254,7 +254,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           </button>
         </div>
       ) : (
-        <div className="relative border-l-2 border-sky-200 ml-2.5 sm:ml-6 space-y-4 sm:space-y-6">
+        <div className="relative border-l-2 border-sky-200 ml-2.5 sm:ml-6 space-y-4 sm:space-y-6 pb-6 sm:pb-8">
           {filteredSchedules.map((item, index) => {
             const badge = getCategoryBadge(item.category);
             const nextItem = filteredSchedules[index + 1];
@@ -382,61 +382,63 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
                     )}
                   </div>
 
-                {/* Timeline Plus Button situated in the zero-extra-height gap between cards */}
-                {index < filteredSchedules.length - 1 && (
-                  <div
-                    className="absolute -bottom-2 sm:-bottom-3 left-0 right-0 h-4 sm:h-6 flex items-center z-10 group/insert pointer-events-auto select-none"
-                    onMouseEnter={() => setActiveInsertIndex(index)}
-                    onMouseLeave={() => {
-                      if (activeInsertIndex === index) setActiveInsertIndex(null);
-                    }}
-                    onTouchStart={(e) => {
+                {/* Timeline Plus Button situated after this card (between cards or after the last card) */}
+                <div
+                  className={`absolute left-0 right-0 flex items-center z-10 group/insert pointer-events-auto select-none ${
+                    index === filteredSchedules.length - 1
+                      ? '-bottom-3 sm:-bottom-4 h-5 sm:h-7'
+                      : '-bottom-2 sm:-bottom-3 h-4 sm:h-6'
+                  }`}
+                  onMouseEnter={() => setActiveInsertIndex(index)}
+                  onMouseLeave={() => {
+                    if (activeInsertIndex === index) setActiveInsertIndex(null);
+                  }}
+                  onTouchStart={(e) => {
+                    e.stopPropagation();
+                    setActiveInsertIndex(index);
+                  }}
+                >
+                  {/* Plus Button on the vertical timeline line */}
+                  <button
+                    type="button"
+                    onClick={(e) => {
                       e.stopPropagation();
-                      setActiveInsertIndex(index);
+                      onOpenAddModal(item.day, linkedTimes.startTime, linkedTimes.endTime, item.id);
                     }}
+                    className={`absolute -left-[10px] sm:-left-[11px] top-1/2 -translate-y-1/2 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-full flex items-center justify-center border-2 border-white shadow-xs transition-all duration-200 cursor-pointer ${
+                      activeInsertIndex === index
+                        ? 'bg-sky-600 text-white scale-115 ring-2 ring-sky-300 ring-offset-1 z-20 opacity-100'
+                        : 'bg-white text-sky-600 border-sky-300 opacity-0 group-hover/insert:opacity-100 group-hover/insert:scale-110 group-hover/insert:bg-sky-600 group-hover/insert:text-white hover:scale-115 z-10'
+                    }`}
+                    title={`이 위치에 새 일정 삽입 (${linkedTimes.startTime} 시작)`}
+                    aria-label={`이 위치에 새 일정 삽입 (${linkedTimes.startTime} 시작)`}
                   >
-                    {/* Plus Button on the vertical timeline line */}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenAddModal(item.day, linkedTimes.startTime, linkedTimes.endTime, item.id);
-                      }}
-                      className={`absolute -left-[10px] sm:-left-[11px] top-1/2 -translate-y-1/2 w-5 h-5 sm:w-5.5 sm:h-5.5 rounded-full flex items-center justify-center border-2 border-white shadow-xs transition-all duration-200 cursor-pointer ${
-                        activeInsertIndex === index
-                          ? 'bg-sky-600 text-white scale-115 ring-2 ring-sky-300 ring-offset-1 z-20 opacity-100'
-                          : 'bg-white text-sky-600 border-sky-300 opacity-0 group-hover/insert:opacity-100 group-hover/insert:scale-110 group-hover/insert:bg-sky-600 group-hover/insert:text-white hover:scale-115 z-10'
-                      }`}
-                      title={`이 위치에 새 일정 삽입 (${linkedTimes.startTime} 시작)`}
-                      aria-label={`이 위치에 새 일정 삽입 (${linkedTimes.startTime} 시작)`}
-                    >
-                      <Plus className="w-3 h-3 stroke-[2.5]" />
-                    </button>
+                    <Plus className="w-3 h-3 stroke-[2.5]" />
+                  </button>
 
-                    {/* Interactive Guideline Chip */}
-                    <div
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenAddModal(item.day, linkedTimes.startTime, linkedTimes.endTime, item.id);
-                      }}
-                      className={`ml-4 sm:ml-8 flex-1 flex items-center space-x-2 py-0.5 px-2 rounded-lg transition-all duration-150 cursor-pointer ${
-                        activeInsertIndex === index
-                          ? 'bg-sky-50/95 border border-dashed border-sky-300 shadow-2xs'
-                          : 'opacity-0 group-hover/insert:opacity-100 hover:bg-sky-50/70 border border-dashed border-transparent hover:border-sky-300'
-                      }`}
-                    >
-                      <div className="h-px bg-sky-200 flex-1 border-t border-dashed border-sky-300" />
-                      <span className="text-[10px] sm:text-[11px] font-bold text-sky-700 bg-white/95 px-2 py-0.5 rounded-full border border-sky-200 shadow-2xs flex items-center space-x-1 shrink-0">
-                        <Plus className="w-2.5 h-2.5 text-sky-600 stroke-[3]" />
-                        <span>새 일정 추가</span>
-                        <span className="text-sky-500 font-semibold text-[10px]">
-                          ({linkedTimes.startTime})
-                        </span>
+                  {/* Interactive Guideline Chip */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onOpenAddModal(item.day, linkedTimes.startTime, linkedTimes.endTime, item.id);
+                    }}
+                    className={`ml-4 sm:ml-8 flex-1 flex items-center space-x-2 py-0.5 px-2 rounded-lg transition-all duration-150 cursor-pointer ${
+                      activeInsertIndex === index
+                        ? 'bg-sky-50/95 border border-dashed border-sky-300 shadow-2xs'
+                        : 'opacity-0 group-hover/insert:opacity-100 hover:bg-sky-50/70 border border-dashed border-transparent hover:border-sky-300'
+                    }`}
+                  >
+                    <div className="h-px bg-sky-200 flex-1 border-t border-dashed border-sky-300" />
+                    <span className="text-[10px] sm:text-[11px] font-bold text-sky-700 bg-white/95 px-2 py-0.5 rounded-full border border-sky-200 shadow-2xs flex items-center space-x-1 shrink-0">
+                      <Plus className="w-2.5 h-2.5 text-sky-600 stroke-[3]" />
+                      <span>새 일정 추가</span>
+                      <span className="text-sky-500 font-semibold text-[10px]">
+                        ({linkedTimes.startTime})
                       </span>
-                      <div className="h-px bg-sky-200 flex-1 border-t border-dashed border-sky-300" />
-                    </div>
+                    </span>
+                    <div className="h-px bg-sky-200 flex-1 border-t border-dashed border-sky-300" />
                   </div>
-                )}
+                </div>
               </div>
             );
           })}
