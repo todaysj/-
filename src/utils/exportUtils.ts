@@ -1,4 +1,5 @@
 import { Trip, ScheduleItem, Reservation, PackingItem, ExpenseItem } from '../types';
+import { resolveTripPhotos } from './imageUtils';
 
 /**
  * Downloads text or JSON content as a file in the browser
@@ -184,11 +185,42 @@ export function exportTripAsMarkdownFile(trip: Trip) {
 }
 
 /**
- * Downloads JSON backup file
+ * Downloads JSON backup file with 100% of souvenir photos fully resolved to base64
  */
-export function exportTripAsJSONFile(trip: Trip) {
-  const content = JSON.stringify(trip, null, 2);
+export async function exportTripAsJSONFile(trip: Trip): Promise<void> {
+  const fullyResolvedTrip = await resolveTripPhotos(trip);
   const cleanTitle = trip.title.replace(/[/\\?%*:|"<>]/g, '_');
-  const filename = `${cleanTitle}_데이터.json`;
+  const filename = `${cleanTitle}_데이터_백업.json`;
+  const content = JSON.stringify(fullyResolvedTrip, null, 2);
+  downloadFile(filename, content, 'application/json;charset=utf-8');
+}
+
+/**
+ * Downloads full comprehensive workspace backup (all trips + all souvenir photos + brand settings)
+ */
+export async function exportFullBackupJSONFile(trips: Trip[], brandSettings?: any): Promise<void> {
+  const resolvedTrips = await Promise.all(
+    trips.map(async (t) => {
+      try {
+        return await resolveTripPhotos(t);
+      } catch {
+        return t;
+      }
+    })
+  );
+
+  const payload = {
+    version: '1.0',
+    exportedAt: new Date().toISOString(),
+    trips: resolvedTrips,
+    localStorage: {
+      jplanner_trips_cache: resolvedTrips,
+      jplanner_brand_settings_cache: brandSettings || undefined
+    },
+    jplanner_brand_settings_cache: brandSettings || undefined
+  };
+
+  const filename = `J플래너_전체여행_기념품사진포함_백업_${new Date().toISOString().split('T')[0]}.json`;
+  const content = JSON.stringify(payload, null, 2);
   downloadFile(filename, content, 'application/json;charset=utf-8');
 }

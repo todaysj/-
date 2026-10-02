@@ -295,9 +295,9 @@ export function getStoredBrandSettings() {
     title: 'J플래너',
     subtitle: '스마트 여행 일정 & 예약 보관함',
     badge: 'MBTI J전용',
-    tabOrder: ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'] as TabType[],
+    tabOrder: ['itinerary', 'souvenirs', 'budget', 'map', 'checklist', 'reservations'] as TabType[],
     adminPassword: '1205',
-    tripOrder: [] as string[]
+    tripOrder: ['trip-1787213502723', 'trip-1786407431435', 'trip-1790572819913'] as string[]
   };
 
   try {

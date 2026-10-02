@@ -250,14 +250,14 @@ export const EventModal: React.FC<EventModalProps> = ({
                       onClick={() => {
                         const match = time.match(/^(\d{1,2}):(\d{2})$/);
                         if (match) {
-                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 90);
+                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 60);
                           setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
                         }
                       }}
                       className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
-                      title="시작 시간 기준 90분(1시간 30분) 뒤로 설정"
+                      title="시작 시간 기준 60분(1시간) 뒤로 설정"
                     >
-                      +90분
+                      +60분
                     </button>
                   </div>
                 </div>

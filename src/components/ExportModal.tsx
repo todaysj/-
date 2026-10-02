@@ -23,6 +23,7 @@ import {
 import {
   exportTripAsMarkdownFile,
   exportTripAsJSONFile,
+  exportFullBackupJSONFile,
   generateTripMarkdown
 } from '../utils/exportUtils';
 import { parseTripBackup } from '../utils/backupUtils';
@@ -30,17 +31,23 @@ import html2pdf from 'html2pdf.js';
 
 interface ExportModalProps {
   trip: Trip;
+  allTrips?: Trip[];
+  brandSettings?: any;
   onClose: () => void;
   onImportTrip?: (importedTrip: Trip) => void;
 }
 
 export const ExportModal: React.FC<ExportModalProps> = ({
   trip,
+  allTrips,
+  brandSettings,
   onClose,
   onImportTrip
 }) => {
   const [copied, setCopied] = useState(false);
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
+  const [isExportingJSON, setIsExportingJSON] = useState(false);
+  const [isExportingAllJSON, setIsExportingAllJSON] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [activePreviewTab, setActivePreviewTab] = useState<'visual' | 'markdown'>('visual');
 
@@ -552,23 +559,78 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
 
             {/* Download JSON Data */}
-            <div className="p-4 rounded-xl border border-slate-200 bg-slate-50/80 hover:bg-white transition flex flex-col justify-between space-y-3">
+            <div className="p-4 rounded-xl border border-indigo-200 bg-indigo-50/40 hover:bg-indigo-50/70 transition flex flex-col justify-between space-y-3">
               <div>
-                <div className="flex items-center space-x-2 text-slate-800 font-bold text-sm mb-1">
-                  <FileJson className="w-4 h-4 text-indigo-600" />
-                  <span>백업 데이터 파일 (.json)</span>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="flex items-center space-x-2 text-slate-900 font-bold text-sm">
+                    <FileJson className="w-4 h-4 text-indigo-600" />
+                    <span>백업 데이터 파일 (.json)</span>
+                  </div>
+                  <span className="text-[10px] font-extrabold px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full border border-emerald-200">
+                    기념품 사진 100% 보존
+                  </span>
                 </div>
-                <p className="text-xs text-slate-500">
-                  나중에 다른 기기나 친구의 플래너로 그대로 복원 및 동기화할 수 있는 원본 JSON 데이터 파일입니다.
+                <p className="text-xs text-slate-600">
+                  기념품 탭의 고화질 사진을 원본 그대로 포함하여 다른 기기나 브라우저에서 100% 동일하게 복원할 수 있는 완전체 백업 파일입니다.
                 </p>
               </div>
-              <button
-                onClick={() => exportTripAsJSONFile(trip)}
-                className="w-full inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg shadow-sm transition"
-              >
-                <Download className="w-3.5 h-3.5" />
-                <span>.json 데이터 백업</span>
-              </button>
+
+              <div className="flex flex-col sm:flex-row gap-2">
+                <button
+                  onClick={async () => {
+                    try {
+                      setIsExportingJSON(true);
+                      await exportTripAsJSONFile(trip);
+                    } catch (e: any) {
+                      alert('백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
+                    } finally {
+                      setIsExportingJSON(false);
+                    }
+                  }}
+                  disabled={isExportingJSON || isExportingAllJSON}
+                  className="flex-1 inline-flex items-center justify-center space-x-1.5 px-3 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-lg shadow-sm transition disabled:opacity-50 cursor-pointer"
+                >
+                  {isExportingJSON ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>현재 여행 사진 병합 중...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5" />
+                      <span>현재 여행 백업 (.json)</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={async () => {
+                    try {
+                      setIsExportingAllJSON(true);
+                      await exportFullBackupJSONFile(allTrips && allTrips.length > 0 ? allTrips : [trip], brandSettings);
+                    } catch (e: any) {
+                      alert('전체 백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
+                    } finally {
+                      setIsExportingAllJSON(false);
+                    }
+                  }}
+                  disabled={isExportingJSON || isExportingAllJSON}
+                  className="flex-1 inline-flex items-center justify-center space-x-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg shadow-sm transition disabled:opacity-50 cursor-pointer"
+                  title="플래너에 등록된 모든 여행 일정과 기념품 사진 전체를 한 번에 백업합니다"
+                >
+                  {isExportingAllJSON ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>전체 사진 병합 중...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Download className="w-3.5 h-3.5" />
+                      <span>전체 여행 통합 백업</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
 

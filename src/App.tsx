@@ -1053,6 +1053,15 @@ export default function App() {
       {isExportModalOpen && (
         <ExportModal
           trip={activeTrip}
+          allTrips={trips}
+          brandSettings={{
+            title: brandTitle,
+            subtitle: brandSubtitle,
+            badge: brandBadge,
+            tabOrder,
+            adminPassword,
+            tripOrder
+          }}
           onClose={() => setIsExportModalOpen(false)}
           onImportTrip={handleImportTrip}
         />
