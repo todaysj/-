@@ -1,10 +1,9 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Trip, CategoryType } from '../types';
 import {
   X,
   FileText,
   FileJson,
-  FileSpreadsheet,
   Download,
   Copy,
   Check,
@@ -17,16 +16,23 @@ import {
   Ticket,
   Wallet,
   CheckSquare,
+  Gift,
   Image as ImageIcon,
-  Loader2
+  Loader2,
+  CheckCircle2,
+  SlidersHorizontal,
+  AlertCircle
 } from 'lucide-react';
 import {
   exportTripAsMarkdownFile,
   exportTripAsJSONFile,
   exportFullBackupJSONFile,
-  generateTripMarkdown
+  generateTripMarkdown,
+  ExportSectionOptions
 } from '../utils/exportUtils';
 import { parseTripBackup } from '../utils/backupUtils';
+import { getTripChecklistTabs, getTripSouvenirTabs, getTagColorInfo } from '../utils/tabUtils';
+import { resolveTripPhotos } from '../utils/imageUtils';
 import html2pdf from 'html2pdf.js';
 
 interface ExportModalProps {
@@ -51,10 +57,128 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [importError, setImportError] = useState<string | null>(null);
   const [activePreviewTab, setActivePreviewTab] = useState<'visual' | 'markdown'>('visual');
 
-  const pdfTemplateRef = useRef<HTMLDivElement>(null);
-  const markdownContent = generateTripMarkdown(trip);
+  // Resolved trip with all IndexedDB photos converted to real base64 data URLs for pristine PDF rendering
+  const [resolvedTrip, setResolvedTrip] = useState<Trip>(trip);
+  const [isResolvingPhotos, setIsResolvingPhotos] = useState<boolean>(true);
 
-  const cleanTitle = trip.title.replace(/[/\\?%*:|"<>]/g, '_');
+  // PDF Section selection state
+  const [exportSections, setExportSections] = useState<ExportSectionOptions>({
+    cover: true,
+    schedule: true,
+    checklist: true,
+    souvenirs: true,
+    reservations: true,
+    expenses: true
+  });
+
+  const pdfTemplateRef = useRef<HTMLDivElement>(null);
+
+  // Load photos (cover, souvenirs, vouchers) for pristine offline PDF export
+  useEffect(() => {
+    let isMounted = true;
+    setIsResolvingPhotos(true);
+    resolveTripPhotos(trip)
+      .then((res) => {
+        if (isMounted) {
+          setResolvedTrip(res);
+        }
+      })
+      .catch((err) => {
+        console.warn('Failed to resolve photos for PDF export:', err);
+      })
+      .finally(() => {
+        if (isMounted) setIsResolvingPhotos(false);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, [trip]);
+
+  // Checklist tabs and items
+  const checklistTabs = useMemo(() => getTripChecklistTabs(resolvedTrip), [resolvedTrip]);
+  const totalChecklistItems = useMemo(
+    () => checklistTabs.reduce((sum, tab) => sum + (tab.items?.length || 0), 0),
+    [checklistTabs]
+  );
+
+  // Souvenir tabs and items
+  const souvenirTabs = useMemo(() => getTripSouvenirTabs(resolvedTrip), [resolvedTrip]);
+  const totalSouvenirs = useMemo(
+    () => souvenirTabs.reduce((sum, tab) => sum + (tab.items?.length || 0), 0),
+    [souvenirTabs]
+  );
+
+  const totalSchedules = resolvedTrip.schedule?.length || 0;
+  const totalReservations = resolvedTrip.reservations?.length || 0;
+  const totalExpenses = resolvedTrip.expenses?.length || 0;
+
+  // Selected sections count
+  const selectedSectionsCount = useMemo(() => {
+    return Object.values(exportSections).filter(Boolean).length;
+  }, [exportSections]);
+
+  const hasAnySectionSelected = selectedSectionsCount > 0;
+
+  // Toggle single section
+  const handleToggleSection = (key: keyof ExportSectionOptions) => {
+    setExportSections((prev) => ({
+      ...prev,
+      [key]: !prev[key]
+    }));
+  };
+
+  // Section selection presets
+  const handleSelectAllSections = () => {
+    setExportSections({
+      cover: true,
+      schedule: true,
+      checklist: true,
+      souvenirs: true,
+      reservations: true,
+      expenses: true
+    });
+  };
+
+  const handleDeselectAllSections = () => {
+    setExportSections({
+      cover: false,
+      schedule: false,
+      checklist: false,
+      souvenirs: false,
+      reservations: false,
+      expenses: false
+    });
+  };
+
+  const handlePresetScheduleOnly = () => {
+    setExportSections({
+      cover: true,
+      schedule: true,
+      reservations: true,
+      checklist: false,
+      souvenirs: false,
+      expenses: false
+    });
+  };
+
+  const handlePresetPrepAndShopping = () => {
+    setExportSections({
+      cover: true,
+      schedule: false,
+      reservations: false,
+      checklist: true,
+      souvenirs: true,
+      expenses: false
+    });
+  };
+
+  // Markdown content dynamically updated based on chosen export sections
+  const markdownContent = useMemo(
+    () => generateTripMarkdown(resolvedTrip, exportSections),
+    [resolvedTrip, exportSections]
+  );
+
+  const cleanTitle = (resolvedTrip.title || trip.title).replace(/[/\\?%*:|"<>]/g, '_');
 
   // Comprehensive cleanup of html2pdf and html2canvas overlay elements so UI never becomes unresponsive
   const cleanupLingeringOverlays = () => {
@@ -87,7 +211,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           htmlEl.style.position === 'fixed' &&
           (htmlEl.className.includes('html2') || htmlEl.style.zIndex === '2147483647' || htmlEl.style.zIndex === '999999' || !htmlEl.id)
         ) {
-          // If it is not part of our React modal
           if (!htmlEl.querySelector('[data-modal-container]')) {
             try {
               htmlEl.remove();
@@ -97,7 +220,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           }
         }
       });
-    } catch (e) {
+    } catch {
       // ignore
     }
   };
@@ -110,7 +233,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   // Handle ESC key to close modal & unmount cleanup
-  React.useEffect(() => {
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         handleModalClose();
@@ -125,8 +248,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   // Calculate Days
   const getDaysCount = () => {
-    const start = new Date(trip.startDate);
-    const end = new Date(trip.endDate);
+    const start = new Date(resolvedTrip.startDate);
+    const end = new Date(resolvedTrip.endDate);
     const diffTime = Math.abs(end.getTime() - start.getTime());
     return Math.max(1, Math.ceil(diffTime / (1000 * 60 * 60 * 24)) + 1);
   };
@@ -249,6 +372,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   };
 
   const handleDownloadPDF = async () => {
+    if (!hasAnySectionSelected) {
+      alert('최소 1개 이상의 내보내기 항목(일정, 체크리스트, 기념품 등)을 선택해주세요.');
+      return;
+    }
+
     if (!pdfTemplateRef.current) return;
     if (activePreviewTab !== 'visual') {
       setActivePreviewTab('visual');
@@ -325,26 +453,26 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
       const opt = {
         margin: 8,
-        filename: `${cleanTitle}_여행일정표.pdf`,
+        filename: `${cleanTitle}_맞춤_여행일정표.pdf`,
         image: { type: 'jpeg' as const, quality: 0.98 },
         html2canvas: {
-          scale: 1.5,
+          scale: 1.25,
           useCORS: true,
           allowTaint: true,
-          imageTimeout: 4000,
+          imageTimeout: 2000,
           logging: false,
           windowWidth: 794
         },
         jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' as const }
       };
 
-      // Bounded race to guarantee it resolves within 7 seconds
+      // Bounded race with generous 30s timeout so PDF generation comfortably completes without premature abort
       await Promise.race([
         html2pdf().set(opt).from(clone).save(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('PDF generation timeout')), 7000))
+        new Promise((_, reject) => setTimeout(() => reject(new Error('PDF generation timeout')), 30000))
       ]);
     } catch (error) {
-      console.error('PDF export fallback:', error);
+      console.warn('PDF direct save notice, falling back to print dialog:', error);
       // Fallback to print window
       handlePrint();
     } finally {
@@ -393,7 +521,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       <!DOCTYPE html>
       <html>
         <head>
-          <title>${trip.title} - 일정표</title>
+          <title>${resolvedTrip.title} - 여행 일정표</title>
           <script src="https://cdn.tailwindcss.com"></script>
           <style>
             @media print {
@@ -475,7 +603,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             </div>
             <div>
               <h3 className="text-lg font-bold">완성된 여행 일정 파일 저장</h3>
-              <p className="text-xs text-slate-400">PDF(그림·서식 포함), 마크다운, 데이터 백업 등 원하시는 형태로 저장하세요</p>
+              <p className="text-xs text-slate-400">PDF(원하는 항목 선택), 마크다운, 데이터 백업 등 자유롭게 저장하세요</p>
             </div>
           </div>
           <button
@@ -489,28 +617,28 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         </div>
 
         {/* Modal Main Scrollable Content */}
-        <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1">
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
           
           {/* Main Action Banner: PDF Direct Download */}
           <div className="p-5 rounded-2xl bg-gradient-to-r from-sky-900 via-indigo-900 to-slate-900 text-white shadow-md border border-sky-700/30 flex flex-col sm:flex-row items-center justify-between gap-4">
             <div className="space-y-1 text-center sm:text-left">
               <div className="inline-flex items-center space-x-1.5 px-2.5 py-0.5 bg-rose-500/20 text-rose-300 border border-rose-400/30 text-xs font-bold rounded-full mb-1">
                 <ImageIcon className="w-3.5 h-3.5" />
-                <span>이미지·디자인 형태 완벽 보존</span>
+                <span>선택 항목 맞춤형 PDF 생성</span>
               </div>
               <h4 className="text-base sm:text-lg font-extrabold text-white">
                 📄 PDF 디자인 문서 파일로 저장
               </h4>
               <p className="text-xs text-slate-300 max-w-lg">
-                커버 사진, 동선 타임라인, 색상 뱃지, 예약 서류 및 가계부 서식이 깔끔하게 적용된 고화질 PDF 파일을 생성하여 다운로드합니다.
+                아래에서 원하는 항목(일정, 체크리스트, 기념품 등)을 선택한 뒤 [PDF 다운로드]를 누르면 맞춤형 고화질 문서가 저장됩니다.
               </p>
             </div>
 
             <div className="flex items-center space-x-2 w-full sm:w-auto">
               <button
                 onClick={handleDownloadPDF}
-                disabled={isGeneratingPDF}
-                className="flex-1 sm:flex-none inline-flex items-center justify-center space-x-2 px-5 py-3 bg-sky-500 hover:bg-sky-400 text-white text-xs sm:text-sm font-bold rounded-xl shadow-lg transition disabled:opacity-50"
+                disabled={isGeneratingPDF || !hasAnySectionSelected}
+                className="flex-1 sm:flex-none inline-flex items-center justify-center space-x-2 px-5 py-3 bg-sky-500 hover:bg-sky-400 text-white text-xs sm:text-sm font-bold rounded-xl shadow-lg transition disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
               >
                 {isGeneratingPDF ? (
                   <>
@@ -520,19 +648,234 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 ) : (
                   <>
                     <Download className="w-4 h-4" />
-                    <span>PDF 다운로드</span>
+                    <span>PDF 다운로드 ({selectedSectionsCount}개 항목)</span>
                   </>
                 )}
               </button>
 
               <button
                 onClick={handlePrint}
-                className="inline-flex items-center justify-center p-3 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-bold rounded-xl border border-slate-700 transition"
+                disabled={!hasAnySectionSelected}
+                className="inline-flex items-center justify-center p-3 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-bold rounded-xl border border-slate-700 transition disabled:opacity-50 cursor-pointer"
                 title="인쇄 또는 PDF 인쇄"
               >
                 <Printer className="w-4 h-4" />
               </button>
             </div>
+          </div>
+
+          {/* Section Selection Card: User Requested Item Selection */}
+          <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-2xs">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2.5 border-b border-slate-200">
+              <div className="flex items-center space-x-2">
+                <SlidersHorizontal className="w-4 h-4 text-sky-600" />
+                <h4 className="font-extrabold text-sm text-slate-900">
+                  PDF 내보내기 항목 선택
+                </h4>
+                <span className="text-[11px] font-bold px-2.5 py-0.5 bg-sky-100 text-sky-800 rounded-full border border-sky-200">
+                  {selectedSectionsCount} / 6개 선택
+                </span>
+              </div>
+
+              {/* Quick Preset Buttons */}
+              <div className="flex items-center flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={handleSelectAllSections}
+                  className="px-2.5 py-1 text-xs font-bold text-sky-700 bg-white hover:bg-sky-50 rounded-lg border border-sky-200 transition shadow-2xs cursor-pointer"
+                >
+                  전체 선택
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDeselectAllSections}
+                  className="px-2.5 py-1 text-xs font-bold text-slate-600 bg-white hover:bg-slate-100 rounded-lg border border-slate-200 transition shadow-2xs cursor-pointer"
+                >
+                  전체 해제
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePresetScheduleOnly}
+                  className="px-2.5 py-1 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 rounded-lg border border-slate-200 transition shadow-2xs cursor-pointer"
+                  title="일정과 예약 서류만 포함"
+                >
+                  일정 중심
+                </button>
+                <button
+                  type="button"
+                  onClick={handlePresetPrepAndShopping}
+                  className="px-2.5 py-1 text-xs font-bold text-slate-700 bg-white hover:bg-slate-100 rounded-lg border border-slate-200 transition shadow-2xs cursor-pointer"
+                  title="준비물 체크리스트와 기념품 목록만 포함"
+                >
+                  체크·기념품만
+                </button>
+              </div>
+            </div>
+
+            {/* Checkbox Options Grid */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+              
+              {/* 1. Cover & Summary */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('cover')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.cover
+                    ? 'bg-sky-50/70 border-sky-400 ring-2 ring-sky-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.cover ? 'bg-sky-500 border-sky-500 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.cover && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center space-x-1 font-bold text-xs text-slate-800">
+                    <span>🖼️ 표지 및 요약</span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">커버 사진, 기간, 총 예산</p>
+                </div>
+              </button>
+
+              {/* 2. Schedule */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('schedule')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.schedule
+                    ? 'bg-sky-50/70 border-sky-400 ring-2 ring-sky-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.schedule ? 'bg-sky-500 border-sky-500 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.schedule && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-800">📅 상세 일정</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-sky-100 text-sky-700 rounded-full">
+                      {totalSchedules}개
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">Day별 동선, 시간, 메모</p>
+                </div>
+              </button>
+
+              {/* 3. Checklist */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('checklist')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.checklist
+                    ? 'bg-emerald-50/70 border-emerald-400 ring-2 ring-emerald-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.checklist ? 'bg-emerald-600 border-emerald-600 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.checklist && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-800">🎒 체크리스트</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-emerald-100 text-emerald-700 rounded-full">
+                      {totalChecklistItems}개
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">동행인 탭별 준비물, 필수품</p>
+                </div>
+              </button>
+
+              {/* 4. Souvenirs */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('souvenirs')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.souvenirs
+                    ? 'bg-purple-50/70 border-purple-400 ring-2 ring-purple-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.souvenirs ? 'bg-purple-600 border-purple-600 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.souvenirs && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-800">🎁 기념품·쇼핑</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-purple-100 text-purple-700 rounded-full">
+                      {totalSouvenirs}개
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">사진, 말머리, 선물대상, 가격</p>
+                </div>
+              </button>
+
+              {/* 5. Reservations */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('reservations')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.reservations
+                    ? 'bg-indigo-50/70 border-indigo-400 ring-2 ring-indigo-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.reservations ? 'bg-indigo-600 border-indigo-600 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.reservations && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-800">🎫 예약 서류함</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-indigo-100 text-indigo-700 rounded-full">
+                      {totalReservations}건
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">항공, 호텔, 예약번호 바우처</p>
+                </div>
+              </button>
+
+              {/* 6. Expenses */}
+              <button
+                type="button"
+                onClick={() => handleToggleSection('expenses')}
+                className={`p-3 rounded-xl border text-left transition flex items-start space-x-2.5 cursor-pointer ${
+                  exportSections.expenses
+                    ? 'bg-amber-50/70 border-amber-400 ring-2 ring-amber-200/60 shadow-2xs'
+                    : 'bg-white border-slate-200 hover:border-slate-300 opacity-70'
+                }`}
+              >
+                <div className={`w-4 h-4 rounded mt-0.5 flex items-center justify-center shrink-0 border ${
+                  exportSections.expenses ? 'bg-amber-600 border-amber-600 text-white' : 'border-slate-300 bg-white'
+                }`}>
+                  {exportSections.expenses && <Check className="w-3 h-3 stroke-[3]" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-xs text-slate-800">💰 가계부·경비</span>
+                    <span className="text-[10px] font-bold px-1.5 py-0.2 bg-amber-100 text-amber-700 rounded-full">
+                      {totalExpenses}건
+                    </span>
+                  </div>
+                  <p className="text-[10.5px] text-slate-500 truncate mt-0.5">지출 내역표, 결제 수단</p>
+                </div>
+              </button>
+
+            </div>
+
+            {!hasAnySectionSelected && (
+              <div className="flex items-center space-x-2 p-2.5 bg-rose-50 border border-rose-200 text-rose-700 rounded-xl text-xs font-semibold">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-500" />
+                <span>최소 1개 이상의 항목을 선택해야 PDF를 다운로드할 수 있습니다.</span>
+              </div>
+            )}
           </div>
 
           {/* Quick Download Formats Grid */}
@@ -546,15 +889,15 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   <span>마크다운 문서 파일 (.md)</span>
                 </div>
                 <p className="text-xs text-slate-500">
-                  노션, 옵시디언 또는 가벼운 텍스트 에디터에 그대로 붙여넣고 편집할 수 있는 마크다운 문구 파일입니다.
+                  선택하신 항목({selectedSectionsCount}개)이 깔끔하게 정리된 텍스트 파일로, 노션이나 옵시디언에 바로 붙여넣을 수 있습니다.
                 </p>
               </div>
               <button
-                onClick={() => exportTripAsMarkdownFile(trip)}
-                className="w-full inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg shadow-sm transition"
+                onClick={() => exportTripAsMarkdownFile(resolvedTrip, exportSections)}
+                className="w-full inline-flex items-center justify-center space-x-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold rounded-lg shadow-sm transition cursor-pointer"
               >
                 <Download className="w-3.5 h-3.5" />
-                <span>.md 파일 다운로드</span>
+                <span>선택 항목 .md 다운로드</span>
               </button>
             </div>
 
@@ -580,7 +923,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   onClick={async () => {
                     try {
                       setIsExportingJSON(true);
-                      await exportTripAsJSONFile(trip);
+                      await exportTripAsJSONFile(resolvedTrip);
                     } catch (e: any) {
                       alert('백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
                     } finally {
@@ -593,7 +936,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   {isExportingJSON ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>현재 여행 사진 병합 중...</span>
+                      <span>사진 병합 중...</span>
                     </>
                   ) : (
                     <>
@@ -607,7 +950,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   onClick={async () => {
                     try {
                       setIsExportingAllJSON(true);
-                      await exportFullBackupJSONFile(allTrips && allTrips.length > 0 ? allTrips : [trip], brandSettings);
+                      await exportFullBackupJSONFile(allTrips && allTrips.length > 0 ? allTrips : [resolvedTrip], brandSettings);
                     } catch (e: any) {
                       alert('전체 백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
                     } finally {
@@ -638,10 +981,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-2 border-t border-slate-100">
             <button
               onClick={handleCopyMarkdown}
-              className="w-full sm:w-auto inline-flex items-center justify-center space-x-1.5 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition"
+              className="w-full sm:w-auto inline-flex items-center justify-center space-x-1.5 px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
             >
               {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4 text-slate-500" />}
-              <span>{copied ? '전체 일정 텍스트 복사 완료!' : '클립보드로 일정 텍스트 복사'}</span>
+              <span>{copied ? '선택 일정 텍스트 복사 완료!' : '선택 일정 텍스트 복사'}</span>
             </button>
 
             {onImportTrip && (
@@ -669,23 +1012,23 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             <div className="flex items-center justify-between mb-2">
               <span className="text-xs font-bold text-slate-700 flex items-center space-x-1">
                 <Sparkles className="w-3.5 h-3.5 text-sky-500" />
-                <span>저장될 파일 미리보기</span>
+                <span>저장될 파일 실시간 미리보기 ({selectedSectionsCount}개 항목 반영)</span>
               </span>
 
               <div className="flex items-center space-x-1 bg-slate-100 p-1 rounded-xl">
                 <button
                   onClick={() => setActivePreviewTab('visual')}
-                  className={`px-3 py-1 text-xs font-bold rounded-lg transition ${
+                  className={`px-3 py-1 text-xs font-bold rounded-lg transition cursor-pointer ${
                     activePreviewTab === 'visual'
                       ? 'bg-white text-slate-800 shadow-sm'
                       : 'text-slate-500 hover:text-slate-800'
                   }`}
                 >
-                  🖼️ 비주얼 PDF 형태 (그림·서식 포함)
+                  🖼️ 비주얼 PDF 형태
                 </button>
                 <button
                   onClick={() => setActivePreviewTab('markdown')}
-                  className={`px-3 py-1 text-xs font-bold rounded-lg transition ${
+                  className={`px-3 py-1 text-xs font-bold rounded-lg transition cursor-pointer ${
                     activePreviewTab === 'markdown'
                       ? 'bg-white text-slate-800 shadow-sm'
                       : 'text-slate-500 hover:text-slate-800'
@@ -704,172 +1047,427 @@ export const ExportModal: React.FC<ExportModalProps> = ({
             )}
 
             {/* Visual Formatted PDF Template View */}
-            <div className={`border border-slate-200 rounded-xl bg-slate-100 p-3 sm:p-4 max-h-[500px] overflow-y-auto ${activePreviewTab === 'markdown' ? 'hidden' : 'block'}`}>
+            <div className={`border border-slate-200 rounded-xl bg-slate-100 p-3 sm:p-4 max-h-[520px] overflow-y-auto ${activePreviewTab === 'markdown' ? 'hidden' : 'block'}`}>
               <div
                 id="pdf-export-template"
                 ref={pdfTemplateRef}
                 className="bg-white p-6 sm:p-8 rounded-xl shadow-md text-slate-800 max-w-3xl mx-auto space-y-6 font-sans text-xs"
               >
-                  {/* PDF Cover Header Banner */}
-                  <div className="relative rounded-xl overflow-hidden bg-slate-900 text-white p-6 shadow-inner">
-                    <img
-                      src={trip.coverImage}
-                      alt={trip.title}
-                      crossOrigin="anonymous"
-                      referrerPolicy="no-referrer"
-                      className="absolute inset-0 w-full h-full object-cover opacity-45"
-                    />
-                    <div className="relative z-10 space-y-2">
-                      <div className="flex items-center space-x-2">
-                        <span className="px-2.5 py-0.5 bg-sky-500 text-white font-bold text-[11px] rounded-full">
-                          📍 {trip.destination}
-                        </span>
-                        <span className="px-2.5 py-0.5 bg-slate-800/90 text-slate-200 font-semibold text-[11px] rounded-full border border-slate-700">
-                          📅 {trip.startDate} ~ {trip.endDate}
-                        </span>
-                      </div>
-                      <h1 className="text-xl sm:text-2xl font-black tracking-tight text-white pt-1">
-                        {trip.title}
-                      </h1>
-                      <div className="flex items-center space-x-4 text-[11px] text-slate-300 pt-1">
-                        <span>총 여행 기간: <strong>{totalDays}일</strong></span>
-                        <span>일정 항목: <strong>{trip.schedule.length}개</strong></span>
-                        <span>예약 서류: <strong>{trip.reservations.length}건</strong></span>
-                        <span>예산: <strong>{trip.totalBudget.toLocaleString()} {trip.currency}</strong></span>
+                  {/* PDF Cover Header Banner: Fixed Korean batchim clipping with ample line-height, padding, and break-keep */}
+                  {exportSections.cover ? (
+                    <div className="relative rounded-xl overflow-hidden bg-slate-900 text-white p-6 shadow-inner" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                      {resolvedTrip.coverImage && (
+                        <img
+                          src={resolvedTrip.coverImage}
+                          alt={resolvedTrip.title}
+                          crossOrigin="anonymous"
+                          referrerPolicy="no-referrer"
+                          className="absolute inset-0 w-full h-full object-cover opacity-45"
+                        />
+                      )}
+                      <div className="relative z-10 space-y-2">
+                        <div className="flex items-center space-x-2">
+                          <span className="px-2.5 py-0.5 bg-sky-500 text-white font-bold text-[11px] rounded-full">
+                            📍 {resolvedTrip.destination}
+                          </span>
+                          <span className="px-2.5 py-0.5 bg-slate-800/90 text-slate-200 font-semibold text-[11px] rounded-full border border-slate-700">
+                            📅 {resolvedTrip.startDate} ~ {resolvedTrip.endDate}
+                          </span>
+                        </div>
+                        {/* Title with guaranteed Korean batchim preservation */}
+                        <h1 className="text-xl sm:text-2xl font-black tracking-normal leading-[1.4] text-white pt-1 pb-2 break-keep korean-title-safe">
+                          {resolvedTrip.title}
+                        </h1>
+                        <div className="flex items-center space-x-4 text-[11px] text-slate-300 pt-0.5 flex-wrap gap-y-1">
+                          <span>총 여행 기간: <strong>{totalDays}일</strong></span>
+                          {exportSections.schedule && <span>일정 항목: <strong>{totalSchedules}개</strong></span>}
+                          {exportSections.reservations && <span>예약 서류: <strong>{totalReservations}건</strong></span>}
+                          {exportSections.checklist && <span>준비물: <strong>{totalChecklistItems}개</strong></span>}
+                          {exportSections.souvenirs && <span>기념품: <strong>{totalSouvenirs}개</strong></span>}
+                          {exportSections.expenses && <span>총 예산: <strong>{resolvedTrip.totalBudget.toLocaleString()} {resolvedTrip.currency}</strong></span>}
+                        </div>
                       </div>
                     </div>
-                  </div>
-
-                  {/* PDF Itinerary Day-by-Day Section */}
-                  <div className="space-y-4">
-                    <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-sky-500 flex items-center space-x-1.5">
-                      <Calendar className="w-4 h-4 text-sky-600" />
-                      <span>📅 일자별 상세 일정 (Day-by-Day Itinerary)</span>
-                    </h2>
-
-                    {Array.from({ length: totalDays }, (_, i) => i + 1).map((dayNum) => {
-                      const dayDate = new Date(trip.startDate);
-                      dayDate.setDate(dayDate.getDate() + (dayNum - 1));
-                      const dateStr = `${dayDate.getMonth() + 1}월 ${dayDate.getDate()}일 (${['일', '월', '화', '수', '목', '금', '토'][dayDate.getDay()]})`;
-
-                      const daySchedules = trip.schedule
-                        .filter((s) => s.day === dayNum)
-                        .sort((a, b) => a.time.localeCompare(b.time));
-
-                      return (
-                        <div key={dayNum} className="space-y-2 bg-slate-50/70 p-3 rounded-lg border border-slate-200/80">
-                          <div className="flex items-center justify-between font-bold text-slate-800 text-xs">
-                            <span className="text-sky-700 font-extrabold">Day {dayNum} ({dateStr})</span>
-                            <span className="text-[10px] text-slate-500">{daySchedules.length}개 일정</span>
-                          </div>
-
-                          {daySchedules.length === 0 ? (
-                            <p className="text-[11px] text-slate-400 italic">등록된 일정 없음</p>
-                          ) : (
-                            <div className="space-y-2 pt-1">
-                              {daySchedules.map((item) => {
-                                const badge = getCategoryBadge(item.category);
-                                return (
-                                  <div
-                                    key={item.id}
-                                    className="bg-white p-2.5 rounded-md border border-slate-200 flex items-start justify-between gap-2 shadow-2xs"
-                                  >
-                                    <div className="space-y-1 min-w-0 flex-1">
-                                      <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
-                                        <span className="font-mono font-bold text-[11px] px-1.5 py-0.2 bg-slate-900 text-white rounded">
-                                          {item.time}{item.endTime ? ` ~ ${item.endTime}` : ''}
-                                        </span>
-                                        <span className={`px-1.5 py-0.2 text-[10px] font-semibold rounded ${badge.bg}`}>
-                                          {badge.label}
-                                        </span>
-                                        {item.bookingRef && (
-                                          <span className="px-1.5 py-0.2 bg-amber-50 text-amber-800 text-[10px] rounded border border-amber-200">
-                                            예약: {item.bookingRef}
-                                          </span>
-                                        )}
-                                      </div>
-                                      <h4 className="font-bold text-slate-800 text-xs">
-                                        {item.isDone ? '✅ ' : '📌 '}{item.title}
-                                      </h4>
-                                      <p className="text-[11px] text-slate-600 flex items-center">
-                                        <MapPin className="w-3 h-3 text-rose-500 mr-0.5" />
-                                        {item.location}
-                                      </p>
-                                      {item.notes && (
-                                        <p className="text-[10.5px] text-slate-500 bg-slate-50 p-1.5 rounded border border-slate-100">
-                                          💡 {item.notes}
-                                        </p>
-                                      )}
-                                    </div>
-
-                                    {item.cost > 0 && (
-                                      <div className="text-right font-bold text-[11px] text-amber-800 bg-amber-50 px-2 py-1 rounded border border-amber-200/60 whitespace-nowrap">
-                                        {item.cost.toLocaleString()} {item.currency}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* PDF Reservations Vouchers Section */}
-                  {trip.reservations.length > 0 && (
-                    <div className="space-y-2 pt-2">
-                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-indigo-500 flex items-center space-x-1.5">
-                        <Ticket className="w-4 h-4 text-indigo-600" />
-                        <span>🎫 예약 서류함 (Reservations)</span>
-                      </h2>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                        {trip.reservations.map((res) => (
-                          <div key={res.id} className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 space-y-1">
-                            <div className="flex items-center justify-between font-bold text-xs text-slate-800">
-                              <span>{res.title}</span>
-                              <span className="font-mono text-[10px] text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200">
-                                {res.confirmationNo}
-                              </span>
-                            </div>
-                            <p className="text-[10.5px] text-slate-600">
-                              이용일: {res.date} {res.time || ''} | 업체: {res.provider}
-                            </p>
-                            {res.details && (
-                              <p className="text-[10px] text-slate-500 bg-white p-1 rounded border border-slate-200/60">
-                                {res.details}
-                              </p>
-                            )}
-                          </div>
-                        ))}
+                  ) : (
+                    /* Compact Header when cover banner is omitted */
+                    <div className="pb-3 border-b-2 border-slate-800 flex items-center justify-between" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                      <div>
+                        <h1 className="text-lg font-black tracking-normal leading-[1.38] text-slate-900 pb-1 break-keep korean-title-safe">
+                          ✈️ {resolvedTrip.title}
+                        </h1>
+                        <p className="text-[11px] text-slate-600">
+                          📍 {resolvedTrip.destination} · 📅 {resolvedTrip.startDate} ~ {resolvedTrip.endDate} ({totalDays}일)
+                        </p>
                       </div>
+                      <span className="text-[10px] text-slate-400 font-medium">J플래너 여행 일정표</span>
                     </div>
                   )}
 
-                  {/* PDF Checklist Section */}
-                  {trip.packingList.length > 0 && (
-                    <div className="space-y-2 pt-2">
-                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-emerald-500 flex items-center space-x-1.5">
-                        <CheckSquare className="w-4 h-4 text-emerald-600" />
-                        <span>🎒 준비물 체크리스트 (Packing Checklist)</span>
+                  {/* 1. PDF Itinerary Day-by-Day Section */}
+                  {exportSections.schedule && (
+                    <div className="space-y-4">
+                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-sky-500 flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5">
+                          <Calendar className="w-4 h-4 text-sky-600" />
+                          <span>📅 일자별 상세 일정 (Day-by-Day Itinerary)</span>
+                        </div>
+                        <span className="text-[11px] font-normal text-slate-500">
+                          총 {totalSchedules}개 일정
+                        </span>
                       </h2>
-                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
-                        {trip.packingList.map((p) => (
-                          <div key={p.id} className="p-1.5 bg-slate-50 rounded border border-slate-200 text-[11px] flex items-center justify-between">
-                            <span className={p.isPacked ? 'line-through text-slate-400' : 'text-slate-800 font-medium'}>
-                              {p.isPacked ? '☑' : '☐'} {p.title}
-                            </span>
-                            {p.isEssential && <span className="text-[9px] text-amber-600 font-bold">필수</span>}
+
+                      {totalSchedules === 0 ? (
+                        <p className="text-[11px] text-slate-400 italic p-3 bg-slate-50 rounded-lg">등록된 일정이 없습니다.</p>
+                      ) : (
+                        Array.from({ length: totalDays }, (_, i) => i + 1).map((dayNum) => {
+                          const dayDate = new Date(resolvedTrip.startDate);
+                          dayDate.setDate(dayDate.getDate() + (dayNum - 1));
+                          const dateStr = `${dayDate.getMonth() + 1}월 ${dayDate.getDate()}일 (${['일', '월', '화', '수', '목', '금', '토'][dayDate.getDay()]})`;
+
+                          const daySchedules = (resolvedTrip.schedule || [])
+                            .filter((s) => s.day === dayNum)
+                            .sort((a, b) => a.time.localeCompare(b.time));
+
+                          return (
+                            <div
+                              key={dayNum}
+                              className="space-y-2 bg-slate-50/70 p-3 rounded-lg border border-slate-200/80"
+                              style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}
+                            >
+                              <div className="flex items-center justify-between font-bold text-slate-800 text-xs">
+                                <span className="text-sky-700 font-extrabold">Day {dayNum} ({dateStr})</span>
+                                <span className="text-[10px] text-slate-500">{daySchedules.length}개 일정</span>
+                              </div>
+
+                              {daySchedules.length === 0 ? (
+                                <p className="text-[11px] text-slate-400 italic">등록된 일정 없음</p>
+                              ) : (
+                                <div className="space-y-2 pt-1">
+                                  {daySchedules.map((item) => {
+                                    const badge = getCategoryBadge(item.category);
+                                    return (
+                                      <div
+                                        key={item.id}
+                                        className="bg-white p-2.5 rounded-md border border-slate-200 flex items-start justify-between gap-2 shadow-2xs"
+                                      >
+                                        <div className="space-y-1 min-w-0 flex-1">
+                                          <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                                            <span className="font-mono font-bold text-[11px] px-1.5 py-0.2 bg-slate-900 text-white rounded">
+                                              {item.time}{item.endTime ? ` ~ ${item.endTime}` : ''}
+                                            </span>
+                                            <span className={`px-1.5 py-0.2 text-[10px] font-semibold rounded ${badge.bg}`}>
+                                              {badge.label}
+                                            </span>
+                                            {item.bookingRef && (
+                                              <span className="px-1.5 py-0.2 bg-amber-50 text-amber-800 text-[10px] rounded border border-amber-200">
+                                                예약: {item.bookingRef}
+                                              </span>
+                                            )}
+                                          </div>
+                                          <h4 className="font-bold text-slate-800 text-xs leading-normal pb-0.5 break-keep">
+                                            {item.isDone ? '✅ ' : '📌 '}{item.title}
+                                          </h4>
+                                          <p className="text-[11px] text-slate-600 flex items-center">
+                                            <MapPin className="w-3 h-3 text-rose-500 mr-0.5 shrink-0" />
+                                            <span>{item.location}</span>
+                                          </p>
+                                          {item.notes && (
+                                            <p className="text-[10.5px] text-slate-500 bg-slate-50 p-1.5 rounded border border-slate-100">
+                                              💡 {item.notes}
+                                            </p>
+                                          )}
+                                        </div>
+
+                                        {item.cost > 0 && (
+                                          <div className="text-right font-bold text-[11px] text-amber-800 bg-amber-50 px-2 py-1 rounded border border-amber-200/60 whitespace-nowrap shrink-0">
+                                            {item.cost.toLocaleString()} {item.currency}
+                                          </div>
+                                        )}
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {/* 2. PDF Reservations Vouchers Section */}
+                  {exportSections.reservations && (
+                    <div className="space-y-3 pt-2" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-indigo-500 flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5">
+                          <Ticket className="w-4 h-4 text-indigo-600" />
+                          <span>🎫 예약 서류함 (Reservations)</span>
+                        </div>
+                        <span className="text-[11px] font-normal text-slate-500">
+                          총 {totalReservations}건
+                        </span>
+                      </h2>
+
+                      {totalReservations === 0 ? (
+                        <p className="text-[11px] text-slate-400 italic p-3 bg-slate-50 rounded-lg">등록된 예약 서류가 없습니다.</p>
+                      ) : (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                          {(resolvedTrip.reservations || []).map((res) => (
+                            <div key={res.id} className="p-2.5 bg-slate-50 rounded-lg border border-slate-200 space-y-1">
+                              <div className="flex items-center justify-between font-bold text-xs text-slate-800">
+                                <span className="break-keep">{res.title}</span>
+                                <span className="font-mono text-[10px] text-indigo-700 bg-indigo-50 px-1.5 py-0.2 rounded border border-indigo-200 shrink-0">
+                                  {res.confirmationNo}
+                                </span>
+                              </div>
+                              <p className="text-[10.5px] text-slate-600">
+                                이용일: {res.date} {res.time || ''} | 업체: {res.provider}
+                              </p>
+                              {res.details && (
+                                <p className="text-[10px] text-slate-500 bg-white p-1 rounded border border-slate-200/60">
+                                  {res.details}
+                                </p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 3. PDF Checklist Section: Full tabs support */}
+                  {exportSections.checklist && (
+                    <div className="space-y-3 pt-2">
+                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-emerald-500 flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5">
+                          <CheckSquare className="w-4 h-4 text-emerald-600" />
+                          <span>🎒 준비물 체크리스트 (Packing Checklist)</span>
+                        </div>
+                        <span className="text-[11px] font-normal text-slate-500">
+                          총 {totalChecklistItems}개 준비물
+                        </span>
+                      </h2>
+
+                      {totalChecklistItems === 0 ? (
+                        <p className="text-[11px] text-slate-400 italic p-3 bg-slate-50 rounded-lg">등록된 준비물이 없습니다.</p>
+                      ) : (
+                        checklistTabs.map((tab) => {
+                          const items = tab.items || [];
+                          if (items.length === 0) return null;
+
+                          return (
+                            <div
+                              key={tab.id}
+                              className="space-y-2 bg-slate-50/70 p-3 rounded-lg border border-slate-200/80"
+                              style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}
+                            >
+                              <div className="flex items-center justify-between font-bold text-slate-800 text-xs pb-1 border-b border-slate-200/60">
+                                <span className="text-emerald-700 font-extrabold flex items-center space-x-1">
+                                  <span>📁 {tab.title}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  {items.filter((i) => i.isPacked).length}/{items.length}개 준비완료
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 pt-1">
+                                {items.map((p) => (
+                                  <div
+                                    key={p.id}
+                                    className="p-2 bg-white rounded border border-slate-200 text-[11px] flex items-center justify-between gap-1 shadow-2xs"
+                                  >
+                                    <span className={`break-keep leading-tight ${p.isPacked ? 'line-through text-slate-400' : 'text-slate-800 font-medium'}`}>
+                                      {p.isPacked ? '☑' : '☐'} {p.title}
+                                    </span>
+                                    {p.isEssential && (
+                                      <span className="text-[9px] text-amber-700 bg-amber-50 px-1 py-0.2 rounded border border-amber-200 font-bold shrink-0">
+                                        필수
+                                      </span>
+                                    )}
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {/* 4. PDF Souvenirs & Shopping Section (Newly Added & Fully Supported) */}
+                  {exportSections.souvenirs && (
+                    <div className="space-y-3 pt-2">
+                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-purple-500 flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5">
+                          <Gift className="w-4 h-4 text-purple-600" />
+                          <span>🎁 기념품 & 쇼핑 리스트 (Souvenirs & Shopping)</span>
+                        </div>
+                        <span className="text-[11px] font-normal text-slate-500">
+                          총 {totalSouvenirs}개 물품
+                        </span>
+                      </h2>
+
+                      {totalSouvenirs === 0 ? (
+                        <p className="text-[11px] text-slate-400 italic p-3 bg-slate-50 rounded-lg">등록된 기념품이나 쇼핑 목록이 없습니다.</p>
+                      ) : (
+                        souvenirTabs.map((tab) => {
+                          const items = tab.items || [];
+                          if (items.length === 0) return null;
+
+                          return (
+                            <div
+                              key={tab.id}
+                              className="space-y-2 bg-slate-50/70 p-3 rounded-lg border border-slate-200/80"
+                              style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}
+                            >
+                              <div className="flex items-center justify-between font-bold text-slate-800 text-xs pb-1 border-b border-slate-200/60">
+                                <span className="text-purple-700 font-extrabold flex items-center space-x-1">
+                                  <span>📁 {tab.title}</span>
+                                </span>
+                                <span className="text-[10px] text-slate-500">
+                                  {items.filter((i) => i.isPurchased).length}/{items.length}개 구입완료
+                                </span>
+                              </div>
+
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                                {items.map((item) => {
+                                  const tagColor = getTagColorInfo(item.tag, tab.tagColors);
+                                  const thumb = item.imageUrl || (item.images && item.images[0]);
+
+                                  return (
+                                    <div
+                                      key={item.id}
+                                      className="bg-white p-2.5 rounded-md border border-slate-200 flex items-start space-x-2.5 shadow-2xs"
+                                    >
+                                      {thumb && (
+                                        <img
+                                          src={thumb}
+                                          alt={item.title}
+                                          crossOrigin="anonymous"
+                                          className="w-12 h-12 rounded-lg object-cover border border-slate-200 shrink-0 mt-0.5"
+                                          onError={(e) => {
+                                            (e.target as HTMLElement).style.display = 'none';
+                                          }}
+                                        />
+                                      )}
+                                      <div className="flex-1 min-w-0 space-y-1">
+                                        <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                                          <span className={`px-1.5 py-0.2 text-[10px] font-bold rounded ${tagColor.badgeClass}`}>
+                                            {item.tag}
+                                          </span>
+                                          <span className={`px-1.5 py-0.2 text-[10px] font-semibold rounded ${
+                                            item.isPurchased
+                                              ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                                              : 'bg-slate-100 text-slate-600 border border-slate-200'
+                                          }`}>
+                                            {item.isPurchased ? '✅ 구입완료' : '☐ 미구입'}
+                                          </span>
+                                        </div>
+                                        <h4 className="font-bold text-slate-900 text-xs leading-normal pb-0.5 break-keep">
+                                          {item.title}
+                                        </h4>
+                                        <div className="text-[10.5px] text-slate-600 space-y-0.5">
+                                          {item.targetPerson && (
+                                            <p className="flex items-center text-slate-700">
+                                              <span className="text-slate-400 mr-1">선물:</span>
+                                              <span className="font-medium">{item.targetPerson}</span>
+                                            </p>
+                                          )}
+                                          {item.location && (
+                                            <p className="flex items-center text-slate-500">
+                                              <MapPin className="w-3 h-3 text-rose-500 mr-0.5 shrink-0" />
+                                              <span className="truncate">{item.location}</span>
+                                            </p>
+                                          )}
+                                          {item.notes && (
+                                            <p className="text-[10px] text-slate-500 bg-slate-50 p-1 rounded border border-slate-100">
+                                              💡 {item.notes}
+                                            </p>
+                                          )}
+                                        </div>
+                                      </div>
+                                      {item.estimatedPrice && item.estimatedPrice > 0 && (
+                                        <div className="text-right font-bold text-[11px] text-purple-800 bg-purple-50 px-2 py-1 rounded border border-purple-200/60 whitespace-nowrap shrink-0">
+                                          {item.estimatedPrice.toLocaleString()} {item.currency || resolvedTrip.currency}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  )}
+
+                  {/* 5. PDF Expenses Section */}
+                  {exportSections.expenses && (
+                    <div className="space-y-3 pt-2" style={{ breakInside: 'avoid', pageBreakInside: 'avoid' }}>
+                      <h2 className="text-sm font-bold text-slate-900 pb-1.5 border-b-2 border-amber-500 flex items-center justify-between">
+                        <div className="flex items-center space-x-1.5">
+                          <Wallet className="w-4 h-4 text-amber-600" />
+                          <span>💰 가계부 및 지출 내역 (Expenses)</span>
+                        </div>
+                        <span className="text-[11px] font-normal text-slate-500">
+                          총 {totalExpenses}건
+                        </span>
+                      </h2>
+
+                      {totalExpenses === 0 ? (
+                        <p className="text-[11px] text-slate-400 italic p-3 bg-slate-50 rounded-lg">등록된 지출 내역이 없습니다.</p>
+                      ) : (
+                        <div className="space-y-2">
+                          <div className="p-3 bg-amber-50/60 rounded-lg border border-amber-200/80 flex items-center justify-between text-xs">
+                            <div>
+                              <span className="text-slate-600">총 예산: </span>
+                              <span className="font-bold text-slate-900">{resolvedTrip.totalBudget.toLocaleString()} {resolvedTrip.currency}</span>
+                            </div>
+                            <div>
+                              <span className="text-slate-600">총 지출: </span>
+                              <span className="font-bold text-amber-800">
+                                {(resolvedTrip.expenses || []).reduce((s, e) => s + e.amount, 0).toLocaleString()} {resolvedTrip.currency}
+                              </span>
+                            </div>
                           </div>
-                        ))}
-                      </div>
+
+                          <div className="overflow-x-auto border border-slate-200 rounded-lg">
+                            <table className="w-full text-[11px] text-left border-collapse">
+                              <thead>
+                                <tr className="bg-slate-100 text-slate-700 border-b border-slate-200">
+                                  <th className="p-2 font-bold">날짜</th>
+                                  <th className="p-2 font-bold">항목명</th>
+                                  <th className="p-2 font-bold">결제수단</th>
+                                  <th className="p-2 font-bold">결제자</th>
+                                  <th className="p-2 font-bold text-right">금액</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {(resolvedTrip.expenses || []).map((exp) => (
+                                  <tr key={exp.id} className="border-b border-slate-100 bg-white hover:bg-slate-50">
+                                    <td className="p-2 text-slate-500 whitespace-nowrap">{exp.date}</td>
+                                    <td className="p-2 font-medium text-slate-900 break-keep">{exp.title}</td>
+                                    <td className="p-2 text-slate-600 whitespace-nowrap">
+                                      {exp.paymentMethod === 'CARD' ? '💳 카드' : '💵 현금'}
+                                    </td>
+                                    <td className="p-2 text-slate-600 whitespace-nowrap">{exp.paidBy}</td>
+                                    <td className="p-2 text-right font-bold text-slate-900 whitespace-nowrap">
+                                      {exp.amount.toLocaleString()} {exp.currency}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
                   {/* Footer note in PDF */}
                   <div className="pt-4 border-t border-slate-200 text-center text-[10px] text-slate-400">
-                    J플래너(Smart Travel Planner)에서 내보낸 일정표 파일입니다.
+                    J플래너(Smart Travel Planner)에서 생성된 여행 문서 파일입니다.
                   </div>
                 </div>
               </div>
@@ -878,7 +1476,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         </div>
 
         {/* Modal Footer */}
-        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3 flex justify-end flex-shrink-0">
+        <div className="bg-slate-50 border-t border-slate-200 px-6 py-3 flex items-center justify-between flex-shrink-0">
+          <div className="text-xs text-slate-500">
+            {selectedSectionsCount}개 항목 선택됨
+          </div>
           <button
             type="button"
             onClick={handleModalClose}
@@ -892,4 +1493,3 @@ export const ExportModal: React.FC<ExportModalProps> = ({
     </div>
   );
 };
-

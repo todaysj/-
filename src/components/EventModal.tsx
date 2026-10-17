@@ -211,8 +211,8 @@ export const EventModal: React.FC<EventModalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
-              <div>
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+              <div className="sm:col-span-3">
                 <label className="block text-xs font-bold text-slate-700 mb-1.5 h-5 flex items-center">
                   시작 시간 *
                 </label>
@@ -225,51 +225,63 @@ export const EventModal: React.FC<EventModalProps> = ({
                 />
               </div>
 
-              <div>
-                <div className="flex items-center justify-between mb-1.5 h-5 whitespace-nowrap">
+              <div className="sm:col-span-6">
+                <div className="flex items-center justify-between mb-1.5 h-5">
                   <label className="text-xs font-bold text-slate-700 flex items-center">
                     종료 시간
                   </label>
-                  <div className="flex items-center space-x-1 shrink-0">
+                  {endTime && (
                     <button
                       type="button"
-                      onClick={() => {
-                        const match = time.match(/^(\d{1,2}):(\d{2})$/);
-                        if (match) {
-                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 30);
-                          setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
-                        }
-                      }}
-                      className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
-                      title="시작 시간 기준 30분 뒤로 설정"
+                      onClick={() => setEndTime('')}
+                      className="text-[10px] text-slate-400 hover:text-rose-500 transition cursor-pointer"
+                      title="종료 시간 지우기"
                     >
-                      +30분
+                      초기화
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const match = time.match(/^(\d{1,2}):(\d{2})$/);
-                        if (match) {
-                          const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 60);
-                          setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
-                        }
-                      }}
-                      className="text-[10px] font-bold px-1.5 py-0.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition cursor-pointer"
-                      title="시작 시간 기준 60분(1시간) 뒤로 설정"
-                    >
-                      +60분
-                    </button>
-                  </div>
+                  )}
                 </div>
-                <input
-                  type="time"
-                  value={endTime}
-                  onChange={(e) => setEndTime(e.target.value)}
-                  className="w-full px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:ring-2 focus:ring-sky-500 outline-none"
-                />
+                <div className="flex items-center space-x-1.5">
+                  <input
+                    type="time"
+                    value={endTime}
+                    onChange={(e) => setEndTime(e.target.value)}
+                    className="flex-1 min-w-0 px-3 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-800 focus:ring-2 focus:ring-sky-500 outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const base = time || endTime || '10:00';
+                      const match = base.match(/^(\d{1,2}):(\d{2})$/);
+                      if (match) {
+                        const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 30);
+                        setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
+                      }
+                    }}
+                    className="px-2.5 py-2.5 bg-slate-100 hover:bg-sky-50 text-slate-700 hover:text-sky-700 border border-slate-200 hover:border-sky-300 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer shadow-2xs whitespace-nowrap active:scale-95"
+                    title="시작 시간 기준 30분 뒤로 설정"
+                  >
+                    +30분
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const base = time || endTime || '10:00';
+                      const match = base.match(/^(\d{1,2}):(\d{2})$/);
+                      if (match) {
+                        const total = Math.min(23 * 60 + 59, parseInt(match[1], 10) * 60 + parseInt(match[2], 10) + 60);
+                        setEndTime(`${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`);
+                      }
+                    }}
+                    className="px-2.5 py-2.5 bg-slate-100 hover:bg-sky-50 text-slate-700 hover:text-sky-700 border border-slate-200 hover:border-sky-300 rounded-xl text-xs font-bold transition shrink-0 cursor-pointer shadow-2xs whitespace-nowrap active:scale-95"
+                    title="시작 시간 기준 60분(1시간) 뒤로 설정"
+                  >
+                    +60분
+                  </button>
+                </div>
               </div>
 
-              <div className="col-span-2 sm:col-span-1">
+              <div className="sm:col-span-3">
                 <label className="block text-xs font-bold text-slate-700 mb-1.5 h-5 flex items-center">
                   카테고리
                 </label>

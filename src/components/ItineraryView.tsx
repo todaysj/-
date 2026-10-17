@@ -89,11 +89,11 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   return (
     <div className="space-y-6">
       {/* Trip Header Banner */}
-      <div className="relative rounded-2xl overflow-hidden shadow-xl bg-slate-900 text-white">
+      <div className="relative rounded-2xl overflow-hidden shadow-xl bg-slate-900 text-white min-h-[190px] sm:min-h-[220px]">
         <AsyncImage
           src={trip.coverImage}
           alt={trip.title}
-          className="w-full h-44 sm:h-56 object-cover opacity-40"
+          className="w-full h-48 sm:h-60 object-cover opacity-40"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-900/60 to-transparent flex flex-col justify-end p-4 sm:p-6 md:p-8">
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
@@ -153,7 +153,7 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
               )}
             </div>
           </div>
-          <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-tight text-white mb-2 line-clamp-2">
+          <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold tracking-normal leading-[1.38] text-white mb-2 pb-1.5 pt-0.5 break-keep overflow-visible korean-title-safe">
             {cleanTripTitle(trip.title)}
           </h2>
           <div className="flex flex-wrap items-center gap-x-4 sm:gap-x-6 gap-y-1 text-xs sm:text-sm text-slate-300">

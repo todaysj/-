@@ -30,6 +30,15 @@
   .pt-safe {
     padding-top: env(safe-area-inset-top, 0rem);
   }
+
+  /* Ensure Korean batchim (bottom consonants) are never clipped by baseline, line-clamp, or overflow */
+  .korean-title-safe {
+    line-height: 1.38 !important;
+    padding-bottom: 0.35rem !important;
+    letter-spacing: -0.01em !important;
+    word-break: keep-all !important;
+    overflow: visible !important;
+  }
 }
 
 html, body {
