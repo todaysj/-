@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Trip, TabType } from '../types';
-import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Upload, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff } from 'lucide-react';
+import { Compass, Calendar, Plus, MapPin, CheckSquare, Ticket, Wallet, Edit3, Download, Upload, Trash2, AlertTriangle, Settings, Sliders, Copy, ListOrdered, Gift, Lock, Share2, RefreshCw, CheckCircle2, AlertCircle, Wifi, WifiOff, Save, Check } from 'lucide-react';
 import { getTripChecklistTabs, getTripSouvenirTabs } from '../utils/tabUtils';
 import { cleanTripTitle } from '../utils/dateUtils';
 import { SyncStatus } from '../lib/tripService';
@@ -26,6 +26,9 @@ interface NavbarProps {
   onLockSite?: () => void;
   syncStatus?: SyncStatus;
   syncMessage?: string;
+  onManualSave?: () => Promise<void> | void;
+  isManualSaving?: boolean;
+  isSaveSuccess?: boolean;
 }
 
 const DEFAULT_NAV_TABS: TabType[] = ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'];
@@ -50,9 +53,34 @@ export const Navbar: React.FC<NavbarProps> = ({
   onRestoreBackup,
   onLockSite,
   syncStatus = 'synced',
-  syncMessage
+  syncMessage,
+  onManualSave,
+  isManualSaving = false,
+  isSaveSuccess = false
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isLocalSaving, setIsLocalSaving] = useState(false);
+  const [isLocalSuccess, setIsLocalSuccess] = useState(false);
+
+  const isSaving = isManualSaving || isLocalSaving;
+  const showSuccess = !isSaving && (isSaveSuccess || isLocalSuccess);
+
+  const handleManualSaveClick = async () => {
+    if (onManualSave && !isSaving) {
+      try {
+        setIsLocalSaving(true);
+        await onManualSave();
+        setIsLocalSuccess(true);
+        setTimeout(() => {
+          setIsLocalSuccess(false);
+        }, 3500);
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setIsLocalSaving(false);
+      }
+    }
+  };
 
   const handleUploadClick = () => {
     fileInputRef.current?.click();
@@ -140,7 +168,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     return `D+${Math.abs(diffDays)}`;
   };
 
-  const dDayText = calculateDDay(activeTrip.startDate);
+  const dDayText = activeTrip?.startDate ? calculateDDay(activeTrip.startDate) : 'D-Day';
 
   // Render Tab Item Helper
   const renderTabButton = (tabKey: TabType) => {
@@ -163,7 +191,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className={`text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full font-bold ${
               isActive ? 'bg-sky-700 text-white' : 'bg-slate-800 text-slate-300'
             }`}>
-              {activeTrip.schedule.length}
+              {activeTrip?.schedule?.length || 0}
             </span>
           </button>
         );
@@ -200,7 +228,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className={`text-[10px] sm:text-xs px-1.5 py-0.2 rounded-full font-bold ${
               isActive ? 'bg-sky-700 text-white' : 'bg-slate-800 text-slate-300'
             }`}>
-              {activeTrip.reservations.length}
+              {activeTrip?.reservations?.length || 0}
             </span>
           </button>
         );
@@ -393,7 +421,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             <div className="flex items-center space-x-1 flex-1 sm:flex-initial min-w-[150px] max-w-full sm:max-w-xs">
               <div className="relative flex-1 sm:min-w-[170px]">
                 <select
-                  value={activeTrip.id}
+                  value={activeTrip?.id || ''}
                   onChange={(e) => onSelectTrip(e.target.value)}
                   className="w-full bg-slate-800 border border-slate-700 text-white text-xs sm:text-sm rounded-xl px-2.5 sm:px-3 py-2 pr-7 sm:pr-8 font-semibold focus:ring-2 focus:ring-sky-500 focus:outline-none cursor-pointer appearance-none truncate"
                 >
@@ -428,7 +456,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               )}
 
-              {onDeleteTrip && (
+              {onDeleteTrip && activeTrip && (
                 <button
                   onClick={() => onDeleteTrip(activeTrip.id)}
                   className="p-2 bg-slate-800 hover:bg-rose-900/60 text-slate-400 hover:text-rose-300 rounded-xl border border-slate-700 hover:border-rose-700 transition shrink-0"
@@ -441,6 +469,38 @@ export const Navbar: React.FC<NavbarProps> = ({
 
             {/* Action Buttons Group */}
             <div className="flex items-center space-x-1.5 shrink-0">
+              {/* Manual Cloud Save Button */}
+              {onManualSave && (
+                <button
+                  type="button"
+                  onClick={handleManualSaveClick}
+                  disabled={isSaving}
+                  className={`inline-flex items-center space-x-1 sm:space-x-1.5 px-3 sm:px-3.5 py-2 text-white text-xs font-bold rounded-xl transition shadow-md whitespace-nowrap shrink-0 cursor-pointer active:scale-95 ${
+                    showSuccess
+                      ? 'bg-emerald-600 ring-2 ring-emerald-400 ring-offset-2 ring-offset-slate-900 shadow-emerald-700/50'
+                      : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 border border-emerald-400/30 shadow-emerald-950/50'
+                  }`}
+                  title="현재 여행일정, 기념품, 가계부 등 모든 변경사항을 클라우드에 즉시 저장하고 다른 기기와 실시간 동기화합니다."
+                >
+                  {isSaving ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>저장 중...</span>
+                    </>
+                  ) : showSuccess ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 stroke-[3] text-emerald-200" />
+                      <span className="text-emerald-100 font-extrabold">저장 완료!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5 text-emerald-200" />
+                      <span>저장</span>
+                    </>
+                  )}
+                </button>
+              )}
+
               {/* New Trip Button */}
               <button
                 onClick={onOpenNewTripModal}
@@ -533,7 +593,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               여행 선택:
             </span>
             {trips.map((trip) => {
-              const isSelected = trip.id === activeTrip.id;
+              const isSelected = trip.id === activeTrip?.id;
               return (
                 <button
                   key={`quick-trip-${trip.id}`}

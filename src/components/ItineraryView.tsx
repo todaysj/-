@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Trip, ScheduleItem, CategoryType } from '../types';
-import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy, Calendar } from 'lucide-react';
+import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy, Calendar, Save, RefreshCw } from 'lucide-react';
 import { AsyncImage } from './AsyncImage';
 import { getGoogleMapsUrl } from '../utils/placeSearch';
 import {
@@ -24,6 +24,9 @@ interface ItineraryViewProps {
   onDeleteTrip?: (tripId: string) => void;
   onDuplicateTrip?: () => void;
   onOpenExportModal?: () => void;
+  onManualSave?: () => void;
+  isManualSaving?: boolean;
+  isSaveSuccess?: boolean;
 }
 
 export const ItineraryView: React.FC<ItineraryViewProps> = ({
@@ -35,7 +38,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   onOpenEditTripModal,
   onDeleteTrip,
   onDuplicateTrip,
-  onOpenExportModal
+  onOpenExportModal,
+  onManualSave,
+  isManualSaving = false,
+  isSaveSuccess = false
 }) => {
   const [selectedDay, setSelectedDay] = useState<number>(1);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -107,6 +113,37 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+              {onManualSave && (
+                <button
+                  type="button"
+                  onClick={onManualSave}
+                  disabled={isManualSaving}
+                  className={`inline-flex items-center space-x-1 px-2.5 sm:px-3 py-1 text-xs font-bold rounded-xl backdrop-blur-md transition cursor-pointer shadow-sm active:scale-95 ${
+                    isSaveSuccess
+                      ? 'bg-emerald-600 text-white ring-2 ring-emerald-400 border border-emerald-400 shadow-emerald-700/50'
+                      : 'bg-emerald-600/90 hover:bg-emerald-500 text-white border border-emerald-400/40'
+                  }`}
+                  title="수정한 일정을 클라우드에 즉시 저장하고 다른 기기와 동기화"
+                >
+                  {isManualSaving ? (
+                    <>
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>저장 중...</span>
+                    </>
+                  ) : isSaveSuccess ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 stroke-[3] text-emerald-200" />
+                      <span className="text-emerald-100 font-extrabold">저장 완료!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Save className="w-3.5 h-3.5 text-emerald-200" />
+                      <span>일정 저장</span>
+                    </>
+                  )}
+                </button>
+              )}
+
               {onDuplicateTrip && (
                 <button
                   onClick={onDuplicateTrip}

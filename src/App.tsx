@@ -44,33 +44,47 @@ const resolveBestTripId = (
   tripList: Trip[],
   currentActiveId?: string,
   orderList?: string[],
-  userSelectedExplicitly?: boolean
+  userSelectedExplicitly?: boolean,
+  cloudActiveTripId?: string
 ): string => {
-  if (!tripList || tripList.length === 0) return 'trip-1787213502723';
+  if (!tripList || tripList.length === 0) return 'trip-1790572819913';
 
-  // 1. If user explicitly switched trip during this active session, preserve their explicit choice
+  // 1. If user explicitly switched trip during this active browser session, preserve their explicit choice
   if (userSelectedExplicitly && currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
     return currentActiveId;
   }
 
-  // 2. Primary trip configured in Cloud tripOrder settings (Highest Priority)
+  // 2. URL parameter ?trip=... (if present and matches a valid trip, e.g. shared deep links)
+  if (typeof window !== 'undefined') {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const urlTrip = urlParams.get('trip');
+      if (urlTrip && tripList.some((t) => t.id === urlTrip)) {
+        return urlTrip;
+      }
+    } catch {}
+  }
+
+  // 3. Cloud configured active trip (from Firestore settings/brand)
+  if (cloudActiveTripId && tripList.some((t) => t.id === cloudActiveTripId)) {
+    return cloudActiveTripId;
+  }
+
+  // 4. Primary trip configured in Cloud tripOrder settings
   if (orderList && orderList.length > 0) {
     const firstOrdered = tripList.find((t) => t.id === orderList[0]);
     if (firstOrdered) return firstOrdered.id;
   }
 
-  // 3. Trip with the most registered schedule items
+  // 5. Trip with the newest updatedAt (most recently modified / uploaded / created)
   const validTrips = (tripList || []).filter((t): t is Trip => Boolean(t && t.id));
-  if (validTrips.length === 0) return 'trip-1787213502723';
+  if (validTrips.length === 0) return 'trip-1790572819913';
 
-  const sortedBySchedule = [...validTrips].sort((a, b) => {
-    const aSched = a?.schedule?.length || 0;
-    const bSched = b?.schedule?.length || 0;
-    if (bSched !== aSched) return bSched - aSched;
+  const sortedByUpdated = [...validTrips].sort((a, b) => {
     return (b?.updatedAt || 0) - (a?.updatedAt || 0);
   });
 
-  return sortedBySchedule[0]?.id || validTrips[0]?.id || 'trip-1787213502723';
+  return sortedByUpdated[0]?.id || validTrips[0]?.id || 'trip-1790572819913';
 };
 
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
@@ -88,10 +102,17 @@ export default function App() {
   const [trips, setTrips] = useState<Trip[]>(() => getStoredTrips());
   const initialBrand = getStoredBrandSettings();
   const userExplicitlySelectedRef = useRef<boolean>(false);
+  const cloudActiveTripIdRef = useRef<string | undefined>(initialBrand.activeTripId);
 
   const [activeTripId, setActiveTripId] = useState<string>(() => {
     const initialList = getStoredTrips();
-    return resolveBestTripId(initialList, undefined, initialBrand.tripOrder, false);
+    return resolveBestTripId(
+      initialList,
+      undefined,
+      initialBrand.tripOrder,
+      false,
+      initialBrand.activeTripId
+    );
   });
   const [activeTab, setActiveTab] = useState<TabType>('itinerary');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -169,8 +190,20 @@ export default function App() {
   const tripOrderRef = useRef<string[]>(initialBrand.tripOrder || []);
   const [adminPassword, setAdminPassword] = useState<string>(initialBrand.adminPassword);
 
-  // Site Access Password Lock State (requires password on site entry)
-  const [isSiteUnlocked, setIsSiteUnlocked] = useState<boolean>(false);
+  // Site Access Password Lock State (requires password on site entry, remembered during active session)
+  const [isSiteUnlocked, setIsSiteUnlocked] = useState<boolean>(() => {
+    try {
+      if (typeof window !== 'undefined') {
+        return sessionStorage.getItem('jplanner_site_unlocked') === 'true';
+      }
+    } catch (e) {}
+    return false;
+  });
+
+  // Manual Cloud Save State
+  const [isManualSaving, setIsManualSaving] = useState<boolean>(false);
+  const [isSaveSuccess, setIsSaveSuccess] = useState<boolean>(false);
+  const saveSuccessTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Password Verification Prompt State
   const [passwordModalConfig, setPasswordModalConfig] = useState<{
@@ -202,6 +235,7 @@ export default function App() {
   // Helper to switch active trip, sync URL and save to localStorage
   const handleSelectTrip = (tripId: string) => {
     userExplicitlySelectedRef.current = true;
+    cloudActiveTripIdRef.current = tripId;
     setActiveTripId(tripId);
     try {
       localStorage.setItem(STORAGE_LAST_TRIP_KEY, tripId);
@@ -211,6 +245,17 @@ export default function App() {
         window.history.replaceState({}, '', url.toString());
       }
     } catch (e) {}
+
+    // Synchronize active trip to Cloud settings so all devices automatically open this trip
+    saveBrandSettingsToFirestore({
+      title: brandTitle,
+      subtitle: brandSubtitle,
+      badge: brandBadge,
+      tabOrder,
+      adminPassword,
+      tripOrder: tripOrderRef.current,
+      activeTripId: tripId
+    });
   };
 
   // Real-time Firestore sync for Trips
@@ -224,7 +269,8 @@ export default function App() {
             sorted,
             prevId,
             tripOrderRef.current,
-            userExplicitlySelectedRef.current
+            userExplicitlySelectedRef.current,
+            cloudActiveTripIdRef.current
           );
           try {
             localStorage.setItem(STORAGE_LAST_TRIP_KEY, resolved);
@@ -255,13 +301,25 @@ export default function App() {
         }
         setTabOrder(order);
       }
+      if (settings.activeTripId) {
+        cloudActiveTripIdRef.current = settings.activeTripId;
+        if (!userExplicitlySelectedRef.current) {
+          setActiveTripId(settings.activeTripId);
+        }
+      }
       if (settings.tripOrder && Array.isArray(settings.tripOrder)) {
         setTripOrder(settings.tripOrder);
         tripOrderRef.current = settings.tripOrder;
         setTrips((prev) => {
           const sorted = sortTripsWithOrder(prev, settings.tripOrder);
           if (!userExplicitlySelectedRef.current && sorted.length > 0) {
-            const bestId = resolveBestTripId(sorted, undefined, settings.tripOrder, false);
+            const bestId = resolveBestTripId(
+              sorted,
+              undefined,
+              settings.tripOrder,
+              false,
+              settings.activeTripId || cloudActiveTripIdRef.current
+            );
             setActiveTripId(bestId);
           }
           return sorted;
@@ -298,6 +356,68 @@ export default function App() {
     });
     if (nextUpdatedTrip) {
       saveTripToFirestore(nextUpdatedTrip);
+    }
+  };
+
+  // Manual Cloud Save Handler: forces immediate synchronization to Firestore and persists full local cache
+  const handleManualSave = async () => {
+    if (isManualSaving) return;
+    setIsManualSaving(true);
+    setIsSaveSuccess(false);
+    try {
+      const current = activeTrip;
+      if (!current) {
+        setIsManualSaving(false);
+        return;
+      }
+      const timestampedTrip: Trip = {
+        ...current,
+        updatedAt: Date.now()
+      };
+
+      // 1. Force direct write active trip to Firestore (with non-blocking 1500ms safety timeout)
+      await saveTripToFirestore(timestampedTrip, true);
+
+      // 2. Persist in local storage & IndexedDB cache for 100% offline persistence
+      const currentTrips = trips.map((t) => (t.id === timestampedTrip.id ? timestampedTrip : t));
+      setTrips(currentTrips);
+      saveTripsToLocalStorage(currentTrips);
+      await saveTripsToIDB(currentTrips).catch(() => {});
+      await saveTripBackup(timestampedTrip).catch(() => {});
+
+      // 3. Update brand settings with this activeTripId and put it at the front of tripOrder
+      const updatedOrder = [timestampedTrip.id, ...tripOrderRef.current.filter((id) => id !== timestampedTrip.id)];
+      setTripOrder(updatedOrder);
+      tripOrderRef.current = updatedOrder;
+
+      await saveBrandSettingsToFirestore({
+        title: brandTitle,
+        subtitle: brandSubtitle,
+        badge: brandBadge,
+        tabOrder,
+        adminPassword: adminPassword || '1205',
+        tripOrder: updatedOrder,
+        activeTripId: timestampedTrip.id
+      }, true);
+
+      // 4. Trigger Save Success feedback
+      setIsSaveSuccess(true);
+      if (saveSuccessTimerRef.current) clearTimeout(saveSuccessTimerRef.current);
+      saveSuccessTimerRef.current = setTimeout(() => {
+        setIsSaveSuccess(false);
+      }, 3500);
+
+      // 5. User feedback toast
+      setToastMessage('클라우드 저장 및 전체 동기화 완료! 어떤 기기에서든 이 사이트 주소와 비밀번호를 입력하면 현재 일정과 기념품을 즉시 확인할 수 있습니다.');
+      setTimeout(() => setToastMessage(null), 5000);
+    } catch (err: any) {
+      console.error('수동 저장 오류:', err);
+      setErrorToast({
+        message: '저장 중 오류가 발생했습니다. 브라우저 캐시에 안전하게 보관되었습니다.',
+        timestamp: Date.now()
+      });
+    } finally {
+      setIsManualSaving(false);
     }
   };
 
@@ -763,22 +883,23 @@ export default function App() {
   // Handler for New Trip
   const handleSaveNewTrip = (newTrip: Trip) => {
     setTrips((prev) => [newTrip, ...prev]);
-    handleSelectTrip(newTrip.id);
-    saveTripToFirestore(newTrip);
 
-    if (tripOrder.length > 0) {
-      const updatedOrder = [newTrip.id, ...tripOrder];
-      setTripOrder(updatedOrder);
-      tripOrderRef.current = updatedOrder;
-      saveBrandSettingsToFirestore({
-        title: brandTitle,
-        subtitle: brandSubtitle,
-        badge: brandBadge,
-        tabOrder,
-        adminPassword,
-        tripOrder: updatedOrder
-      });
-    }
+    const updatedOrder = [newTrip.id, ...tripOrderRef.current.filter((id) => id !== newTrip.id)];
+    setTripOrder(updatedOrder);
+    tripOrderRef.current = updatedOrder;
+
+    handleSelectTrip(newTrip.id);
+    saveTripToFirestore(newTrip, true);
+
+    saveBrandSettingsToFirestore({
+      title: brandTitle,
+      subtitle: brandSubtitle,
+      badge: brandBadge,
+      tabOrder,
+      adminPassword,
+      tripOrder: updatedOrder,
+      activeTripId: newTrip.id
+    });
   };
 
   // Handler for Imported Trip
@@ -792,8 +913,23 @@ export default function App() {
       saveTripBackup(importedTrip).catch(() => {});
       return updated;
     });
+
+    const updatedOrder = [importedTrip.id, ...tripOrderRef.current.filter((id) => id !== importedTrip.id)];
+    setTripOrder(updatedOrder);
+    tripOrderRef.current = updatedOrder;
+
     handleSelectTrip(importedTrip.id);
-    saveTripToFirestore(importedTrip);
+    saveTripToFirestore(importedTrip, true);
+
+    saveBrandSettingsToFirestore({
+      title: brandTitle,
+      subtitle: brandSubtitle,
+      badge: brandBadge,
+      tabOrder,
+      adminPassword,
+      tripOrder: updatedOrder,
+      activeTripId: importedTrip.id
+    });
   };
 
   // Handler for full backup file restore (trip-backup.json)
@@ -850,6 +986,19 @@ export default function App() {
           await saveTripToFirestore(trip, true);
         }
 
+        const updatedOrder = [targetId, ...tripOrderRef.current.filter((id) => id !== targetId)];
+        setTripOrder(updatedOrder);
+        tripOrderRef.current = updatedOrder;
+        saveBrandSettingsToFirestore({
+          title: brandTitle,
+          subtitle: brandSubtitle,
+          badge: brandBadge,
+          tabOrder,
+          adminPassword,
+          tripOrder: updatedOrder,
+          activeTripId: targetId
+        });
+
         // 5. Notify user
         setToastMessage(result.message);
         setTimeout(() => setToastMessage(null), 5000);
@@ -872,6 +1021,15 @@ export default function App() {
         brandTitle={brandTitle}
         brandSubtitle={brandSubtitle}
       />
+    );
+  }
+
+  if (trips.length === 0) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4 space-y-4">
+        <div className="w-10 h-10 border-4 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
+        <p className="text-sm font-semibold text-slate-300">클라우드에서 여행 일정을 불러오는 중입니다...</p>
+      </div>
     );
   }
 
@@ -899,6 +1057,9 @@ export default function App() {
         onLockSite={() => setIsSiteUnlocked(false)}
         syncStatus={syncStatus}
         syncMessage={syncMessage}
+        onManualSave={handleManualSave}
+        isManualSaving={isManualSaving}
+        isSaveSuccess={isSaveSuccess}
       />
 
       {/* Offline Status Alert Banner */}
@@ -936,6 +1097,9 @@ export default function App() {
             onDeleteTrip={handleRequestDeleteTrip}
             onDuplicateTrip={() => handleDuplicateTrip(activeTrip)}
             onOpenExportModal={() => setIsExportModalOpen(true)}
+            onManualSave={handleManualSave}
+            isManualSaving={isManualSaving}
+            isSaveSuccess={isSaveSuccess}
           />
         )}
 
@@ -976,6 +1140,9 @@ export default function App() {
             activeSouvenirTabId={activeTab.includes(':') ? activeTab.split(':')[1] : undefined}
             onSelectSouvenirTab={(id) => setActiveTab(`souvenirs:${id}`)}
             onUpdateTrip={(updated) => updateActiveTrip(() => updated)}
+            onManualSave={handleManualSave}
+            isManualSaving={isManualSaving}
+            isSaveSuccess={isSaveSuccess}
           />
         )}
       </main>

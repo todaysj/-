@@ -1,4 +1,4 @@
-const CACHE_NAME = 'j-planner-offline-v1';
+const CACHE_NAME = 'j-planner-offline-v2';
 
 // Initial core assets to pre-cache
 const STATIC_ASSETS = [
@@ -35,6 +35,25 @@ self.addEventListener('fetch', (event) => {
 
   // Ignore non-GET requests or chrome-extension schemes
   if (request.method !== 'GET' || !request.url.startsWith('http')) {
+    return;
+  }
+
+  let requestUrl;
+  try {
+    requestUrl = new URL(request.url);
+  } catch {
+    return;
+  }
+
+  // CRITICAL: NEVER intercept Firestore, Firebase, or external API endpoints!
+  // This allows real-time Firestore sync and cross-device syncing to work seamlessly.
+  if (
+    requestUrl.hostname.includes('firestore.googleapis.com') ||
+    requestUrl.hostname.includes('firebase') ||
+    requestUrl.hostname.includes('googleapis.com') ||
+    requestUrl.protocol.startsWith('ws') ||
+    requestUrl.origin !== self.location.origin
+  ) {
     return;
   }
 

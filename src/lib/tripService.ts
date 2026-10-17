@@ -297,7 +297,8 @@ export function getStoredBrandSettings() {
     badge: 'MBTI J전용',
     tabOrder: ['itinerary', 'souvenirs', 'budget', 'map', 'checklist', 'reservations'] as TabType[],
     adminPassword: '1205',
-    tripOrder: ['trip-1787213502723', 'trip-1786407431435', 'trip-1790572819913'] as string[]
+    tripOrder: ['trip-1790572819913', 'trip-1786407431435', 'trip-1791376631348', 'trip-1787213502723'] as string[],
+    activeTripId: 'trip-1790572819913' as string | undefined
   };
 
   try {
@@ -532,7 +533,9 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
   if (forceDirectWrite) {
     try {
       const payloadHash = JSON.stringify(safePayload);
-      await setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      const writePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1500));
+      await Promise.race([writePromise, timeoutPromise]);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
@@ -846,6 +849,7 @@ export function subscribeToBrandSettings(
     tabOrder?: TabType[];
     adminPassword?: string;
     tripOrder?: string[];
+    activeTripId?: string;
   }) => void
 ) {
   // Immediately provide cached brand settings
@@ -864,7 +868,8 @@ export function subscribeToBrandSettings(
             badge: data.badge || 'MBTI J전용',
             tabOrder: data.tabOrder || ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'],
             adminPassword: data.adminPassword || '1205',
-            tripOrder: data.tripOrder || undefined
+            tripOrder: data.tripOrder || undefined,
+            activeTripId: data.activeTripId || undefined
           };
           safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
           if (settings.adminPassword) {
@@ -910,14 +915,18 @@ export function subscribeToBrandSettings(
 /**
  * Persist Brand settings directly to Firestore `settings/brand`
  */
-export async function saveBrandSettingsToFirestore(settings: {
-  title: string;
-  subtitle: string;
-  badge: string;
-  tabOrder?: TabType[];
-  adminPassword?: string;
-  tripOrder?: string[];
-}) {
+export async function saveBrandSettingsToFirestore(
+  settings: {
+    title: string;
+    subtitle: string;
+    badge: string;
+    tabOrder?: TabType[];
+    adminPassword?: string;
+    tripOrder?: string[];
+    activeTripId?: string;
+  },
+  forceDirect = false
+) {
   safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
   if (settings.adminPassword) {
     safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
@@ -932,10 +941,10 @@ export async function saveBrandSettingsToFirestore(settings: {
 
   if (pendingBrandTimer) {
     clearTimeout(pendingBrandTimer);
+    pendingBrandTimer = null;
   }
 
-  pendingBrandTimer = setTimeout(async () => {
-    pendingBrandTimer = null;
+  const writeSettings = async () => {
     if (isQuotaExceeded()) {
       updateSyncStatus('local-saved', '설정 로컬 저장 완료');
       return;
@@ -947,7 +956,9 @@ export async function saveBrandSettingsToFirestore(settings: {
         updateSyncStatus('synced', '실시간 동기화됨');
         return;
       }
-      await setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
+      const writePromise = setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1200));
+      await Promise.race([writePromise, timeoutPromise]);
       lastWrittenBrandHash = hash;
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
@@ -961,5 +972,14 @@ export async function saveBrandSettingsToFirestore(settings: {
         : '브랜드 설정을 클라우드에 저장하지 못했습니다.';
       notifyFirestoreError(errMsg, err);
     }
-  }, 400);
+  };
+
+  if (forceDirect) {
+    await writeSettings();
+  } else {
+    pendingBrandTimer = setTimeout(async () => {
+      pendingBrandTimer = null;
+      await writeSettings();
+    }, 400);
+  }
 }

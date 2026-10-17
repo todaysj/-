@@ -32,7 +32,8 @@ import {
   RotateCcw,
   Sparkles,
   RefreshCw,
-  Palette
+  Palette,
+  Save
 } from 'lucide-react';
 import { getTripSouvenirTabs, DEFAULT_SOUVENIR_TAGS, TAG_COLOR_PALETTE, DEFAULT_TAG_COLORS, getTagColorInfo } from '../utils/tabUtils';
 import { getPhotoLocal, getPhotoByItemOrFallback, recoverAllTripPhotos } from '../utils/photoStore';
@@ -163,13 +164,19 @@ interface SouvenirViewProps {
   activeSouvenirTabId?: string;
   onSelectSouvenirTab?: (tabId: string) => void;
   onUpdateTrip: (updatedTrip: Trip) => void;
+  onManualSave?: () => void;
+  isManualSaving?: boolean;
+  isSaveSuccess?: boolean;
 }
 
 export const SouvenirView: React.FC<SouvenirViewProps> = ({
   trip,
   activeSouvenirTabId,
   onSelectSouvenirTab,
-  onUpdateTrip
+  onUpdateTrip,
+  onManualSave,
+  isManualSaving = false,
+  isSaveSuccess = false
 }) => {
   const souvenirTabs = getTripSouvenirTabs(trip);
   const currentTab = souvenirTabs.find((t) => t.id === activeSouvenirTabId) || souvenirTabs[0] || {
@@ -909,6 +916,37 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center space-x-2 flex-wrap gap-y-2">
+            {onManualSave && (
+              <button
+                type="button"
+                onClick={onManualSave}
+                disabled={isManualSaving}
+                title="수정한 기념품 목록을 클라우드에 즉시 저장하고 다른 기기와 동기화합니다."
+                className={`inline-flex items-center space-x-1.5 px-3.5 py-2.5 font-bold text-xs sm:text-sm rounded-xl transition shadow-md active:scale-95 cursor-pointer border ${
+                  isSaveSuccess
+                    ? 'bg-emerald-600 text-white ring-2 ring-emerald-400 border-emerald-400 shadow-emerald-700/50'
+                    : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white border-emerald-400/30 shadow-emerald-600/20'
+                }`}
+              >
+                {isManualSaving ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>저장 중...</span>
+                  </>
+                ) : isSaveSuccess ? (
+                  <>
+                    <Check className="w-4 h-4 stroke-[3] text-emerald-200" />
+                    <span className="font-extrabold text-emerald-100">저장 완료!</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-4 h-4 text-emerald-200" />
+                    <span>기념품 저장</span>
+                  </>
+                )}
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleOpenBackupModal}
