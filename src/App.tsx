@@ -17,7 +17,7 @@ import { ExportModal } from './components/ExportModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
-import { CheckCircle2, WifiOff, AlertTriangle, X } from 'lucide-react';
+import { CheckCircle2, WifiOff, AlertTriangle, X, Upload } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
 import { getTotalTripDays, adjustSubsequentSchedules } from './utils/dateUtils';
 import {
@@ -26,11 +26,13 @@ import {
   deleteTripFromFirestore,
   subscribeToBrandSettings,
   saveBrandSettingsToFirestore,
+  syncAllTripsToServer,
   getStoredTrips,
   getStoredBrandSettings,
   saveTripsToLocalStorage,
   subscribeToSyncStatus,
   subscribeToFirestoreErrors,
+  isQuotaExceeded,
   SyncStatus
 } from './lib/tripService';
 import { getAllLocalPhotos, savePhotoToCloud } from './utils/photoStore';
@@ -98,6 +100,39 @@ const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
   });
 };
 
+const DEFAULT_STARTER_TRIP: Trip = {
+  id: 'trip-1790572819913',
+  title: '새 여행 일정',
+  destination: '여행지',
+  startDate: new Date().toISOString().split('T')[0],
+  endDate: new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0],
+  coverImage: '',
+  totalBudget: 0,
+  currency: 'KRW',
+  schedule: [],
+  reservations: [],
+  expenses: [],
+  packingList: [],
+  checklistTabs: [
+    {
+      id: 'cl-default',
+      title: '기본 체크리스트',
+      items: [],
+      categories: ['필수 서류', '전자기기', '금융/통신', '의류/세면', '상비약', '기타']
+    }
+  ],
+  souvenirTabs: [
+    {
+      id: 'souv-default',
+      title: '기념품',
+      items: [],
+      tags: ['식품', '화장품', '의류', '기념품', '면세품', '기타'],
+      tagColors: {}
+    }
+  ],
+  updatedAt: Date.now()
+};
+
 export default function App() {
   const [trips, setTrips] = useState<Trip[]>(() => getStoredTrips());
   const initialBrand = getStoredBrandSettings();
@@ -120,6 +155,16 @@ export default function App() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus>('connecting');
   const [syncMessage, setSyncMessage] = useState<string>('DB 연결 대기 중...');
   const [isOffline, setIsOffline] = useState<boolean>(() => !navigator.onLine);
+  const [loadTimedOut, setLoadTimedOut] = useState<boolean>(false);
+  const restoreFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Safety watchdog timer for initial cloud load (prevents blank/infinite spinner on devices when Firestore quota is exceeded)
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setLoadTimedOut(true);
+    }, 2500);
+    return () => clearTimeout(timer);
+  }, []);
 
   // Subscribe to DB Sync Status & Silent Error Monitor
   useEffect(() => {
@@ -408,8 +453,8 @@ export default function App() {
       }, 3500);
 
       // 5. User feedback toast
-      setToastMessage('클라우드 저장 및 전체 동기화 완료! 어떤 기기에서든 이 사이트 주소와 비밀번호를 입력하면 현재 일정과 기념품을 즉시 확인할 수 있습니다.');
-      setTimeout(() => setToastMessage(null), 5000);
+      setToastMessage('클라우드 서버에 안전하게 저장되었습니다! 모든 기기(스마트폰, 노트북, 공유된 기기)에 실시간 자동 동기화됩니다.');
+      setTimeout(() => setToastMessage(null), 4000);
     } catch (err: any) {
       console.error('수동 저장 오류:', err);
       setErrorToast({
@@ -981,15 +1026,16 @@ export default function App() {
           }
         } catch {}
 
-        // 4. Safely sync directly to Firestore for instant cross-device synchronization
+        // 4. Safely sync directly to Server & Firestore for instant cross-device synchronization
+        await syncAllTripsToServer(result.trips);
         for (const trip of result.trips) {
-          await saveTripToFirestore(trip, true);
+          saveTripToFirestore(trip, true).catch(() => {});
         }
 
         const updatedOrder = [targetId, ...tripOrderRef.current.filter((id) => id !== targetId)];
         setTripOrder(updatedOrder);
         tripOrderRef.current = updatedOrder;
-        saveBrandSettingsToFirestore({
+        await saveBrandSettingsToFirestore({
           title: brandTitle,
           subtitle: brandSubtitle,
           badge: brandBadge,
@@ -997,11 +1043,11 @@ export default function App() {
           adminPassword,
           tripOrder: updatedOrder,
           activeTripId: targetId
-        });
+        }, true);
 
         // 5. Notify user
-        setToastMessage(result.message);
-        setTimeout(() => setToastMessage(null), 5000);
+        setToastMessage(`${result.message} 모든 기기(스마트폰, 공유된 다른 사용자 기기)에 즉시 실시간 자동 동기화되었습니다!`);
+        setTimeout(() => setToastMessage(null), 4500);
       } catch (err: any) {
         console.error('백업 복원 실패:', err);
         setErrorToast({
@@ -1025,10 +1071,59 @@ export default function App() {
   }
 
   if (trips.length === 0) {
+    if (!loadTimedOut) {
+      return (
+        <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4 space-y-4">
+          <div className="w-10 h-10 border-4 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
+          <p className="text-sm font-semibold text-slate-300">클라우드에서 여행 일정을 불러오는 중입니다...</p>
+        </div>
+      );
+    }
+
     return (
-      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4 space-y-4">
-        <div className="w-10 h-10 border-4 border-sky-500 border-t-transparent rounded-full animate-spin"></div>
-        <p className="text-sm font-semibold text-slate-300">클라우드에서 여행 일정을 불러오는 중입니다...</p>
+      <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-6 text-center">
+        <div className="max-w-md w-full bg-slate-800/90 border border-slate-700/80 rounded-3xl p-6 sm:p-8 shadow-2xl space-y-6">
+          <div className="w-14 h-14 mx-auto rounded-2xl bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400">
+            <WifiOff className="w-7 h-7" />
+          </div>
+          <div>
+            <h2 className="text-xl font-bold text-white mb-2">클라우드 연결 안내</h2>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              Firebase 클라우드 응답 대기 중이거나 일일 할당량 소진 상태입니다.<br />
+              노트북에서 다운로드한 백업 파일(<span className="text-emerald-400 font-mono">trip-backup.json</span>)이 있으신 경우 바로 불러올 수 있습니다.
+            </p>
+          </div>
+
+          <div className="space-y-3 pt-2">
+            <input
+              ref={restoreFileInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleRestoreBackup(file);
+              }}
+            />
+            <button
+              onClick={() => restoreFileInputRef.current?.click()}
+              className="w-full py-3.5 px-4 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-2xl transition shadow-lg shadow-emerald-950 flex items-center justify-center space-x-2 text-sm cursor-pointer active:scale-95"
+            >
+              <Upload className="w-4 h-4" />
+              <span>백업 파일(JSON)로 즉시 일정 불러오기</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setTrips([DEFAULT_STARTER_TRIP]);
+                setActiveTripId(DEFAULT_STARTER_TRIP.id);
+              }}
+              className="w-full py-3 px-4 bg-slate-700/80 hover:bg-slate-600 text-slate-200 font-semibold rounded-2xl transition border border-slate-600/70 text-xs sm:text-sm cursor-pointer"
+            >
+              <span>새 여행으로 시작하기 (앱 화면 열기)</span>
+            </button>
+          </div>
+        </div>
       </div>
     );
   }

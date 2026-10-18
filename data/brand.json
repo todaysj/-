@@ -1,0 +1,22 @@
+{
+  "tripOrder": [
+    "trip-1786407431435",
+    "trip-1790572819913",
+    "trip-1791376631348",
+    "trip-1787213502723"
+  ],
+  "updatedAt": 1792220747422,
+  "title": "J플래너",
+  "tabOrder": [
+    "itinerary",
+    "souvenirs",
+    "budget",
+    "map",
+    "checklist",
+    "reservations"
+  ],
+  "activeTripId": "trip-1786407431435",
+  "adminPassword": "1205",
+  "badge": "MBTI J전용",
+  "subtitle": "스마트 여행 일정 & 예약 보관함"
+}

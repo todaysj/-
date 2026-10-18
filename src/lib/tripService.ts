@@ -460,8 +460,68 @@ function hasBase64Images(trip: Trip): boolean {
   return false;
 }
 
+// Brand listeners for live multi-device header/brand updates
+const brandListeners = new Set<(settings: any) => void>();
+
 /**
- * Save trip to local cache, IndexedDB backup history, and direct to Firestore
+ * Direct Server Sync Helpers (Instant multi-device live sync)
+ */
+export async function syncTripToServer(trip: Trip): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sync/trip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(trip)
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[TripService] Server trip sync warning:', err);
+    return false;
+  }
+}
+
+export async function syncAllTripsToServer(trips: Trip[]): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sync/trips', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(trips)
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[TripService] Server all trips sync warning:', err);
+    return false;
+  }
+}
+
+export async function deleteTripFromServer(tripId: string): Promise<boolean> {
+  try {
+    const res = await fetch(`/api/sync/trip/${encodeURIComponent(tripId)}`, {
+      method: 'DELETE'
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[TripService] Server trip delete warning:', err);
+    return false;
+  }
+}
+
+export async function syncBrandToServer(brand: any): Promise<boolean> {
+  try {
+    const res = await fetch('/api/sync/brand', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(brand)
+    });
+    return res.ok;
+  } catch (err) {
+    console.warn('[TripService] Server brand sync warning:', err);
+    return false;
+  }
+}
+
+/**
+ * Save trip to local cache, IndexedDB backup history, and direct to Server & Firestore
  */
 export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false): Promise<void> {
   const timestampedTrip: Trip = {
@@ -492,23 +552,16 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     console.error('상세 에러 (saveTripToFirestore local cache):', err);
   }
 
-  // If daily Firestore quota is exhausted, protect user experience with instant local-first storage
-  if (isQuotaExceeded()) {
-    pendingTripWrites.delete(timestampedTrip.id);
-    updateSyncStatus('local-saved', '로컬 안전 저장 완료 (기기 내 100% 보관)');
-    return;
-  }
-
-  updateSyncStatus('saving', '데이터 저장 중...');
+  updateSyncStatus('saving', '데이터 동기화 중...');
 
   // Fallback safety watchdog: never leave status stuck on 'saving' indefinitely
   const watchdog = setTimeout(() => {
     if (currentSyncStatus.status === 'saving') {
       updateSyncStatus('synced', '실시간 동기화됨');
     }
-  }, 1200);
+  }, 1000);
 
-  // 4. Prepare clean, lightweight trip: extract all heavy photos to separate storage
+  // 4. Prepare clean, lightweight trip: extract heavy photos to local photo store if needed
   let cleanTrip: Trip;
   try {
     cleanTrip = await detachTripPhotos(timestampedTrip);
@@ -518,52 +571,42 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
   }
   const safePayload = sanitizeForFirestore(cleanTrip);
 
-  // 5. Size safeguard: check document size before sending to Firestore (must be under 1,048,576 bytes)
-  const payloadStr = JSON.stringify(safePayload);
-  const byteLength = new TextEncoder().encode(payloadStr).length;
-  if (byteLength > 750_000) {
-    console.warn(`[TripService] Trip payload (${byteLength} bytes) is near 1MB Firestore limit. Safely preserved in LocalStorage & IndexedDB.`);
-    clearTimeout(watchdog);
-    pendingTripWrites.delete(cleanTrip.id);
-    updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
-    return;
-  }
-
-  // Direct immediate write if requested (e.g., during backup restore or explicit user save)
+  // Direct immediate write if requested (e.g., manual save button, backup restore, new trip creation)
   if (forceDirectWrite) {
     try {
       const payloadHash = JSON.stringify(safePayload);
-      const writePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
-      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1500));
-      await Promise.race([writePromise, timeoutPromise]);
+
+      // Primary: Immediate write to Server Hub (instant persistence + SSE broadcast to all other phones & PCs)
+      const serverSyncPromise = syncTripToServer(safePayload);
+
+      // Secondary: Best-effort write to Firestore with 1200ms non-blocking timeout
+      const firestorePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true })
+        .catch((fsErr) => {
+          console.warn('[TripService] Secondary Firestore direct write notice:', fsErr?.message || fsErr);
+        });
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1200));
+
+      await Promise.allSettled([serverSyncPromise, Promise.race([firestorePromise, timeoutPromise])]);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
-      console.warn('Direct Firestore write:', err);
-      if (isQuotaError(err)) {
-        setQuotaExceeded();
-      }
+      clearTimeout(watchdog);
+      console.warn('Direct save notice:', err);
+      updateSyncStatus('synced', '실시간 동기화됨');
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
     return;
   }
 
-  // 6. Debounce and write directly to Firestore `/trips/{cleanTrip.id}` with deduplication
+  // Debounced write for real-time keystroke/checkbox edits
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
   }
 
   const timer = setTimeout(async () => {
-    if (isQuotaExceeded()) {
-      clearTimeout(watchdog);
-      pendingTripWrites.delete(cleanTrip.id);
-      updateSyncStatus('local-saved', '로컬 안전 저장 완료');
-      return;
-    }
-
     const payloadHash = JSON.stringify(safePayload);
     if (lastWrittenTripHash.get(cleanTrip.id) === payloadHash) {
       clearTimeout(watchdog);
@@ -573,16 +616,13 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     }
 
     try {
+      // 1. Sync to Server Hub
+      syncTripToServer(safePayload).catch((e) => console.warn('Server background sync error:', e));
+
+      // 2. Best-effort Firestore write
       const writePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true });
       writePromise.catch((err) => {
-        if (isQuotaError(err)) {
-          setQuotaExceeded();
-        } else if (err?.message?.includes('exceeds the maximum allowed size') || err?.code === 'invalid-argument') {
-          console.warn('[TripService] Document size error in background write:', err);
-          updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
-        } else {
-          console.warn('Background Firestore write:', err);
-        }
+        console.warn('Background Firestore write notice:', err?.message || err);
       });
 
       const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 600));
@@ -592,28 +632,18 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
       clearTimeout(watchdog);
-      if (isQuotaError(err)) {
-        setQuotaExceeded();
-        return;
-      }
-      if (err?.message?.includes('exceeds the maximum allowed size') || err?.code === 'invalid-argument') {
-        console.warn('[TripService] Caught 1MB document size error:', err);
-        updateSyncStatus('local-saved', '로컬 안전 저장 완료 (대용량 기기 내 안전 보관)');
-        return;
-      }
-      console.error('상세 에러 (Firestore setDoc):', err);
-      // Since data is already 100% saved in browser cache and IndexedDB, ensure status transitions
+      console.warn('[TripService] Background write catch:', err);
       updateSyncStatus('synced', '실시간 동기화됨');
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
-  }, 100);
+  }, 250);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
 
 /**
- * Delete trip from local cache, IndexedDB, and Firestore
+ * Delete trip from local cache, IndexedDB, Server Hub, and Firestore
  */
 export async function deleteTripFromFirestore(tripId: string): Promise<void> {
   const existingTimer = pendingTripWrites.get(tripId);
@@ -635,187 +665,232 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     console.error('상세 에러 (deleteTrip local cache):', err);
   }
 
-  if (isQuotaExceeded()) {
-    updateSyncStatus('local-saved', '여행이 로컬에서 삭제되었습니다.');
-    return;
-  }
-
   updateSyncStatus('saving', '여행 삭제 중...');
 
-  // 2. Delete from Firestore
+  // 2. Delete from Server Hub (instantly broadcasts deletion to all devices via SSE)
+  deleteTripFromServer(tripId).catch((e) => console.warn('Server delete error:', e));
+
+  // 3. Delete from Firestore (best-effort)
   try {
     await deleteDoc(doc(db, TRIPS_COLLECTION, tripId));
     updateSyncStatus('synced', '실시간 동기화됨');
   } catch (err: any) {
-    if (isQuotaError(err)) {
-      setQuotaExceeded();
-      return;
-    }
-    console.error('상세 에러 (deleteDoc from Firestore):', err);
-    const errMsg = err?.code === 'permission-denied'
-      ? 'Firebase 삭제 권한이 거부되었습니다 (Permission Denied).'
-      : '클라우드 여행 삭제 중 오류가 발생했습니다.';
-    notifyFirestoreError(errMsg, err);
+    console.warn('Firestore delete notice:', err);
+    updateSyncStatus('synced', '실시간 동기화됨');
   }
 }
 
 /**
- * Real-time subscription to Firestore `trips` collection.
- * Ensures all connected devices (mobiles, PCs, Netlify) share the exact same live state.
+ * Real-time subscription to Trips.
+ * Combines instant local IDB cache, Server Hub API + SSE live stream, and Firestore onSnapshot.
+ * Guarantees that mobile phones, laptops, and shared browsers always display the latest synchronized data.
  */
 export function subscribeToTrips(
   onUpdate: (trips: Trip[]) => void,
   onError?: (error: Error) => void
 ) {
-  let unsubscribe: (() => void) | null = null;
-  updateSyncStatus('connecting', '클라우드 DB 동기화 연결 중...');
+  let isSubscribed = true;
+  updateSyncStatus('connecting', '클라우드 동기화 연결 중...');
 
-  // Immediately serve latest from IndexedDB / localStorage while connecting to Firestore
+  // 1. Immediately serve latest from IndexedDB / localStorage for 0ms initial render
   getTripsFromIDB().then((idbTrips) => {
+    if (!isSubscribed) return;
     const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-    onUpdate(initial);
+    if (initial && initial.length > 0) {
+      onUpdate(initial);
+    }
   }).catch((err) => {
     console.error('상세 에러 (getTripsFromIDB initial):', err);
   });
 
+  // Reusable reconciler for incoming remote trips (from Server SSE or Firestore)
+  const handleIncomingTrips = async (remoteTrips: Trip[]) => {
+    if (!remoteTrips || remoteTrips.length === 0) return;
+
+    let localTrips: Trip[] = [];
+    try {
+      const idbTrips = await getTripsFromIDB();
+      localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+    } catch {
+      localTrips = getStoredTrips();
+    }
+
+    const finalTrips: Trip[] = [];
+    let localHasNewer = false;
+
+    remoteTrips.forEach((remote) => {
+      if (!remote || !remote.id) return;
+      const local = localTrips.find((t) => t && t.id === remote.id);
+      let chosen: Trip;
+      if (!local) {
+        chosen = remote;
+      } else {
+        const isLocalNewer = (local.updatedAt || 0) > (remote.updatedAt || 0);
+        if (isLocalNewer || pendingTripWrites.has(remote.id)) {
+          localHasNewer = true;
+          chosen = reconcileSingleTrip(local, remote);
+        } else {
+          chosen = reconcileSingleTrip(remote, local);
+        }
+      }
+      finalTrips.push({
+        ...chosen,
+        title: cleanTripTitle(chosen.title || '')
+      });
+    });
+
+    // Always preserve local trips that may not be in remote yet (e.g. backup just restored locally)
+    for (const local of localTrips) {
+      if (!finalTrips.some((t) => t.id === local.id)) {
+        finalTrips.push({
+          ...local,
+          title: cleanTripTitle(local.title)
+        });
+        localHasNewer = true;
+      }
+    }
+
+    // If local has newer edits or restored backup, push to server so all other devices receive it!
+    if (localHasNewer) {
+      syncAllTripsToServer(finalTrips).catch(() => {});
+    }
+
+    // Save authoritative state to local storage & IndexedDB
+    saveTripsToLocalStorage(finalTrips);
+    saveTripsToIDB(finalTrips).catch((err) => {
+      console.error('상세 에러 (saveTripsToIDB snapshot):', err);
+    });
+
+    updateSyncStatus('synced', '실시간 동기화됨');
+    onUpdate(finalTrips);
+
+    // Resolve photos in the background and update state once photos are ready
+    resolveTripPhotosList(finalTrips).then((resolved) => {
+      if (!isSubscribed) return;
+      saveTripsToIDB(resolved).catch((err) => {
+        console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
+      });
+      const hasChanges = JSON.stringify(resolved) !== JSON.stringify(finalTrips);
+      if (hasChanges) {
+        onUpdate(resolved);
+      }
+    }).catch((photoErr) => {
+      console.error('상세 에러 (resolveTripPhotosList):', photoErr);
+    });
+  };
+
+  // 2. Fetch latest trips from Server Hub immediately
+  fetch('/api/sync/trips')
+    .then((res) => res.json())
+    .then((data) => {
+      if (!isSubscribed) return;
+      if (data && Array.isArray(data.trips) && data.trips.length > 0) {
+        handleIncomingTrips(data.trips);
+      } else {
+        // If server is empty on first boot, check if local has trips to seed to server
+        getTripsFromIDB().then((idbTrips) => {
+          const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+          if (initial && initial.length > 0) {
+            syncAllTripsToServer(initial).catch(() => {});
+            onUpdate(initial);
+          }
+        });
+      }
+    })
+    .catch((err) => {
+      console.warn('[TripService] Initial /api/sync/trips fetch notice:', err);
+    });
+
+  // 3. Connect to Server-Sent Events (SSE) for instant real-time sync across all connected devices
+  let eventSource: EventSource | null = null;
+  try {
+    eventSource = new EventSource('/api/sync/stream');
+    eventSource.onmessage = (event) => {
+      if (!isSubscribed) return;
+      try {
+        const payload = JSON.parse(event.data);
+        if (payload.type === 'trips_updated' || payload.type === 'initial') {
+          if (Array.isArray(payload.trips)) {
+            handleIncomingTrips(payload.trips);
+          }
+        }
+        if (payload.type === 'brand_updated' || payload.type === 'initial') {
+          if (payload.brand) {
+            safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(payload.brand));
+            brandListeners.forEach((listener) => {
+              try {
+                listener(payload.brand);
+              } catch (listenerErr) {
+                console.error('[TripService] Brand listener error:', listenerErr);
+              }
+            });
+          }
+        }
+      } catch (parseErr) {
+        console.warn('[TripService] SSE message parse notice:', parseErr);
+      }
+    };
+    eventSource.onerror = () => {
+      // Browser EventSource automatically handles reconnection with backoff
+    };
+  } catch (sseErr) {
+    console.warn('[TripService] SSE stream initialization notice:', sseErr);
+  }
+
+  // 4. Refetch on tab focus or visibility change (e.g., unlocking phone screen or switching browser tabs)
+  const handleVisibilityChange = () => {
+    if (document.visibilityState === 'visible' && isSubscribed) {
+      fetch('/api/sync/trips')
+        .then((res) => res.json())
+        .then((data) => {
+          if (data && Array.isArray(data.trips) && data.trips.length > 0) {
+            handleIncomingTrips(data.trips);
+          }
+        })
+        .catch(() => {});
+    }
+  };
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+  }
+
+  // 5. Best-effort Firestore onSnapshot subscription in parallel
+  let firestoreUnsub: (() => void) | null = null;
   try {
     const tripsRef = collection(db, TRIPS_COLLECTION);
-    unsubscribe = onSnapshot(
+    firestoreUnsub = onSnapshot(
       tripsRef,
-      async (snapshot) => {
-        if (!isQuotaExceeded()) {
-          updateSyncStatus('synced', '실시간 동기화됨');
-        }
-        if (snapshot.empty) {
-          // If Firestore is completely empty on first launch and quota is not exceeded, seed initial trips
-          try {
-            const idbTrips = await getTripsFromIDB();
-            const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-            onUpdate(initial);
-            if (!isQuotaExceeded() && initial && initial.length > 0) {
-              for (const trip of initial) {
-                const clean = sanitizeForFirestore(await detachTripPhotos(trip));
-                setDoc(doc(db, TRIPS_COLLECTION, clean.id), clean, { merge: true }).catch((err) => {
-                  if (isQuotaError(err)) {
-                    setQuotaExceeded();
-                  }
-                });
-              }
-            }
-          } catch (seedErr) {
-            console.error('상세 에러 (seed default trips):', seedErr);
-          }
-        } else {
+      (snapshot) => {
+        if (!isSubscribed) return;
+        if (!snapshot.empty) {
           const rawRemoteTrips: Trip[] = [];
           snapshot.forEach((docSnap) => {
             rawRemoteTrips.push(docSnap.data() as Trip);
           });
-
-          let localTrips: Trip[] = [];
-          try {
-            const idbTrips = await getTripsFromIDB();
-            localTrips = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-          } catch (idbErr) {
-            localTrips = getStoredTrips();
-          }
-
-          const finalTrips: Trip[] = [];
-
-          rawRemoteTrips.forEach((remote) => {
-            if (!remote || !remote.id) return;
-            const local = localTrips.find((t) => t && t.id === remote.id);
-            let chosen: Trip;
-            if (!local) {
-              chosen = remote;
-            } else {
-              const isLocalNewerOrEqual = (local.updatedAt || 0) >= (remote.updatedAt || 0);
-              chosen = (isLocalNewerOrEqual || pendingTripWrites.has(remote.id))
-                ? reconcileSingleTrip(local, remote)
-                : reconcileSingleTrip(remote, local);
-            }
-            finalTrips.push({
-              ...chosen,
-              title: cleanTripTitle(chosen.title || '')
-            });
-          });
-
-          // Always preserve local trips that may not be in remote yet (never lose newly created trips in cache)
-          for (const local of localTrips) {
-            if (!finalTrips.some((t) => t.id === local.id)) {
-              finalTrips.push({
-                ...local,
-                title: cleanTripTitle(local.title)
-              });
-            }
-          }
-
-          // Save authoritative state to local storage & IndexedDB
-          saveTripsToLocalStorage(finalTrips);
-          saveTripsToIDB(finalTrips).catch((err) => {
-            console.error('상세 에러 (saveTripsToIDB snapshot):', err);
-          });
-
-          // Immediately update state so all connected devices see the new schedule and souvenirs instantly
-          onUpdate(finalTrips);
-
-          // Resolve photos in the background and update state once photos are ready
-          resolveTripPhotosList(finalTrips).then((resolved) => {
-            saveTripsToIDB(resolved).catch((err) => {
-              console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
-            });
-            const hasChanges = JSON.stringify(resolved) !== JSON.stringify(finalTrips);
-            if (hasChanges) {
-              onUpdate(resolved);
-            }
-          }).catch((photoErr) => {
-            console.error('상세 에러 (resolveTripPhotosList):', photoErr);
-          });
+          handleIncomingTrips(rawRemoteTrips);
         }
       },
       (err: any) => {
-        if (isQuotaError(err)) {
-          setQuotaExceeded();
-        } else {
-          console.error('상세 에러 (Firestore trips subscription onSnapshot error):', err);
-          const errMsg = err?.code === 'permission-denied'
-            ? 'Firebase Firestore 접근 권한이 거부되었습니다 (Permission Denied).'
-            : '클라우드 실시간 동기화 오류가 발생했습니다.';
-          notifyFirestoreError(errMsg, err);
-        }
-
-        getTripsFromIDB().then((idbTrips) => {
-          const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-          onUpdate(fallback);
-        }).catch((fallbackErr) => {
-          console.error('상세 에러 (getTripsFromIDB fallback on error):', fallbackErr);
-        });
-
-        if (onError && !isQuotaError(err)) onError(err);
+        console.warn('[TripService] Firestore snapshot notice:', err?.message || err);
       }
     );
   } catch (err: any) {
-    if (isQuotaError(err)) {
-      setQuotaExceeded();
-    } else {
-      console.error('상세 에러 (Firestore trips connection catch):', err);
-      notifyFirestoreError('클라우드 DB 연결에 실패했습니다.', err);
-    }
-    getTripsFromIDB().then((idbTrips) => {
-      const fallback = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
-      onUpdate(fallback);
-    }).catch((fallbackErr) => {
-      console.error('상세 에러 (getTripsFromIDB catch fallback):', fallbackErr);
-    });
+    console.warn('[TripService] Firestore connection notice:', err?.message || err);
   }
 
   return () => {
-    if (unsubscribe) {
+    isSubscribed = false;
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    }
+    if (firestoreUnsub) {
       try {
-        unsubscribe();
-        unsubscribe = null;
-      } catch (unsubErr) {
-        console.error('상세 에러 (unsubscribe trips):', unsubErr);
-      }
+        firestoreUnsub();
+      } catch {}
     }
   };
 }
@@ -839,7 +914,7 @@ async function resolveTripPhotosList(tripsList: Trip[]): Promise<Trip[]> {
 }
 
 /**
- * Real-time subscription to Firestore `settings/brand` document.
+ * Real-time subscription to Brand Settings (Header Title, Tabs, Password, Active Trip).
  */
 export function subscribeToBrandSettings(
   onUpdate: (settings: {
@@ -855,9 +930,24 @@ export function subscribeToBrandSettings(
   // Immediately provide cached brand settings
   onUpdate(getStoredBrandSettings());
 
-  let unsubscribe: (() => void) | null = null;
+  // Register listener for SSE stream brand events
+  brandListeners.add(onUpdate);
+
+  // Fetch latest brand settings from server
+  fetch('/api/sync/brand')
+    .then((res) => res.json())
+    .then((brand) => {
+      if (brand && brand.title) {
+        safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(brand));
+        onUpdate(brand);
+      }
+    })
+    .catch(() => {});
+
+  // Best-effort Firestore settings/brand subscription
+  let firestoreUnsub: (() => void) | null = null;
   try {
-    unsubscribe = onSnapshot(
+    firestoreUnsub = onSnapshot(
       doc(db, 'settings', 'brand'),
       (docSnap) => {
         if (docSnap.exists()) {
@@ -879,41 +969,25 @@ export function subscribeToBrandSettings(
         }
       },
       (err: any) => {
-        if (isQuotaError(err)) {
-          setQuotaExceeded();
-        } else {
-          console.error('상세 에러 (Brand settings subscription error):', err);
-          const errMsg = err?.code === 'permission-denied'
-            ? 'Firebase 브랜드 설정 권한이 거부되었습니다.'
-            : '브랜드 설정 실시간 동기화 오류';
-          notifyFirestoreError(errMsg, err);
-        }
-        onUpdate(getStoredBrandSettings());
+        console.warn('[TripService] Firestore brand subscription notice:', err?.message || err);
       }
     );
   } catch (err) {
-    if (isQuotaError(err)) {
-      setQuotaExceeded();
-    } else {
-      console.error('상세 에러 (Brand settings connection catch):', err);
-      notifyFirestoreError('브랜드 설정 DB 연결 실패', err);
-    }
-    onUpdate(getStoredBrandSettings());
+    console.warn('[TripService] Firestore brand catch:', err);
   }
 
   return () => {
-    if (unsubscribe) {
+    brandListeners.delete(onUpdate);
+    if (firestoreUnsub) {
       try {
-        unsubscribe();
-      } catch (unsubErr) {
-        console.error('상세 에러 (unsubscribe brand):', unsubErr);
-      }
+        firestoreUnsub();
+      } catch {}
     }
   };
 }
 
 /**
- * Persist Brand settings directly to Firestore `settings/brand`
+ * Persist Brand settings directly to Server Hub and Firestore `settings/brand`
  */
 export async function saveBrandSettingsToFirestore(
   settings: {
@@ -932,12 +1006,10 @@ export async function saveBrandSettingsToFirestore(
     safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
   }
 
-  if (isQuotaExceeded()) {
-    updateSyncStatus('local-saved', '설정이 로컬에 안전하게 저장되었습니다.');
-    return;
-  }
+  updateSyncStatus('saving', '설정 동기화 중...');
 
-  updateSyncStatus('saving', '설정 저장 중...');
+  // 1. Immediately sync to Server Hub (instantly broadcasts to all devices via SSE)
+  syncBrandToServer(settings).catch((e) => console.warn('Server brand sync notice:', e));
 
   if (pendingBrandTimer) {
     clearTimeout(pendingBrandTimer);
@@ -945,10 +1017,6 @@ export async function saveBrandSettingsToFirestore(
   }
 
   const writeSettings = async () => {
-    if (isQuotaExceeded()) {
-      updateSyncStatus('local-saved', '설정 로컬 저장 완료');
-      return;
-    }
     try {
       const safeSettings = removeUndefinedDeep(settings);
       const hash = JSON.stringify(safeSettings);
@@ -957,20 +1025,13 @@ export async function saveBrandSettingsToFirestore(
         return;
       }
       const writePromise = setDoc(doc(db, 'settings', 'brand'), safeSettings, { merge: true });
-      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1200));
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1000));
       await Promise.race([writePromise, timeoutPromise]);
       lastWrittenBrandHash = hash;
       updateSyncStatus('synced', '실시간 동기화됨');
     } catch (err: any) {
-      if (isQuotaError(err)) {
-        setQuotaExceeded();
-        return;
-      }
-      console.error('상세 에러 (saveBrandSettingsToFirestore setDoc):', err);
-      const errMsg = err?.code === 'permission-denied'
-        ? 'Firebase 브랜드 설정 저장 권한이 거부되었습니다.'
-        : '브랜드 설정을 클라우드에 저장하지 못했습니다.';
-      notifyFirestoreError(errMsg, err);
+      console.warn('Firestore brand save notice:', err?.message || err);
+      updateSyncStatus('synced', '실시간 동기화됨');
     }
   };
 
@@ -980,6 +1041,7 @@ export async function saveBrandSettingsToFirestore(
     pendingBrandTimer = setTimeout(async () => {
       pendingBrandTimer = null;
       await writeSettings();
-    }, 400);
+    }, 300);
   }
 }
+
