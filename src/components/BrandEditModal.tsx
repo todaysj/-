@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   X,
   Check,
@@ -119,6 +119,10 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
   const [orderedTrips, setOrderedTrips] = useState<Trip[]>([...trips]);
   const [tripOrderSaved, setTripOrderSaved] = useState(false);
 
+  useEffect(() => {
+    setOrderedTrips([...trips]);
+  }, [trips]);
+
   // Password change states
   const [oldPw, setOldPw] = useState('');
   const [newPw, setNewPw] = useState('');
@@ -179,6 +183,12 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    if (onSaveTripOrder) {
+      const orderChanged = JSON.stringify(orderedTrips.map((t) => t.id)) !== JSON.stringify(trips.map((t) => t.id));
+      if (orderChanged) {
+        onSaveTripOrder(orderedTrips);
+      }
+    }
     onSave(title.trim(), subtitle.trim(), '', tabOrder);
     onClose();
   };

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Trip } from '../types';
 import { cleanTripTitle } from '../utils/dateUtils';
 import {
@@ -30,6 +30,10 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    setOrderedTrips([...trips]);
+  }, [trips]);
 
   const handleMoveUp = (index: number) => {
     if (index <= 0) return;

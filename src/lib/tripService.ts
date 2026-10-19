@@ -308,8 +308,8 @@ export function getStoredBrandSettings() {
     badge: 'MBTI J전용',
     tabOrder: ['itinerary', 'souvenirs', 'budget', 'map', 'checklist', 'reservations'] as TabType[],
     adminPassword: '1205',
-    tripOrder: ['trip-1790572819913', 'trip-1786407431435', 'trip-1791376631348', 'trip-1787213502723'] as string[],
-    activeTripId: 'trip-1790572819913' as string | undefined
+    tripOrder: [] as string[],
+    activeTripId: undefined as string | undefined
   };
 
   try {
@@ -971,6 +971,15 @@ export function subscribeToBrandSettings(
       (docSnap) => {
         if (docSnap.exists()) {
           const data = docSnap.data();
+          const remoteUpdated = Number(data.updatedAt) || 0;
+          const currentCached = getStoredBrandSettings();
+          const localUpdated = Number((currentCached as any).updatedAt) || 0;
+
+          // If local or Server Hub has newer brand settings, do NOT let a stale Firestore snapshot overwrite it!
+          if (localUpdated > remoteUpdated) {
+            return;
+          }
+
           const settings = {
             title: data.title || 'J플래너',
             subtitle: data.subtitle || '스마트 여행 일정 & 예약 보관함',
@@ -978,7 +987,8 @@ export function subscribeToBrandSettings(
             tabOrder: data.tabOrder || ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'],
             adminPassword: data.adminPassword || '1205',
             tripOrder: data.tripOrder || undefined,
-            activeTripId: data.activeTripId || undefined
+            activeTripId: data.activeTripId || undefined,
+            updatedAt: remoteUpdated
           };
           safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
           if (settings.adminPassword) {
@@ -1017,15 +1027,20 @@ export async function saveBrandSettingsToFirestore(
     adminPassword?: string;
     tripOrder?: string[];
     activeTripId?: string;
+    updatedAt?: number;
   },
   forceDirect = false
 ) {
-  safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
-  if (settings.adminPassword) {
-    safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
+  const settingsWithTimestamp = {
+    ...settings,
+    updatedAt: settings.updatedAt || Date.now()
+  };
+  safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settingsWithTimestamp));
+  if (settingsWithTimestamp.adminPassword) {
+    safeLocalStorageSet('jplanner_site_password', settingsWithTimestamp.adminPassword);
   }
 
-  const safeSettings = removeUndefinedDeep(settings);
+  const safeSettings = removeUndefinedDeep(settingsWithTimestamp);
   const hash = JSON.stringify(safeSettings);
   if (lastWrittenBrandHash === hash && !forceDirect) {
     return;
@@ -1034,7 +1049,7 @@ export async function saveBrandSettingsToFirestore(
   updateSyncStatus('saving', '설정 동기화 중...');
 
   // 1. Immediately sync to Server Hub (instantly broadcasts to all devices via SSE)
-  syncBrandToServer(settings).catch((e) => console.warn('Server brand sync notice:', e));
+  syncBrandToServer(settingsWithTimestamp).catch((e) => console.warn('Server brand sync notice:', e));
 
   if (pendingBrandTimer) {
     clearTimeout(pendingBrandTimer);

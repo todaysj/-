@@ -49,7 +49,7 @@ const resolveBestTripId = (
   userSelectedExplicitly?: boolean,
   cloudActiveTripId?: string
 ): string => {
-  if (!tripList || tripList.length === 0) return 'trip-1790572819913';
+  if (!tripList || tripList.length === 0) return '';
 
   // 1. If user explicitly switched trip during this active browser session, preserve their explicit choice
   if (userSelectedExplicitly && currentActiveId && tripList.some((t) => t.id === currentActiveId)) {
@@ -67,26 +67,26 @@ const resolveBestTripId = (
     } catch {}
   }
 
-  // 3. Cloud configured active trip (from Firestore settings/brand)
-  if (cloudActiveTripId && tripList.some((t) => t.id === cloudActiveTripId)) {
-    return cloudActiveTripId;
-  }
-
-  // 4. Primary trip configured in Cloud tripOrder settings
+  // 3. Primary trip configured in Cloud tripOrder settings (top of user's custom order)
   if (orderList && orderList.length > 0) {
     const firstOrdered = tripList.find((t) => t.id === orderList[0]);
     if (firstOrdered) return firstOrdered.id;
   }
 
-  // 5. Trip with the newest updatedAt (most recently modified / uploaded / created)
+  // 4. Cloud configured active trip (from Firestore settings/brand)
+  if (cloudActiveTripId && tripList.some((t) => t.id === cloudActiveTripId)) {
+    return cloudActiveTripId;
+  }
+
+  // 5. Trip with the newest updatedAt or first available in tripList
   const validTrips = (tripList || []).filter((t): t is Trip => Boolean(t && t.id));
-  if (validTrips.length === 0) return 'trip-1790572819913';
+  if (validTrips.length === 0) return '';
 
   const sortedByUpdated = [...validTrips].sort((a, b) => {
     return (b?.updatedAt || 0) - (a?.updatedAt || 0);
   });
 
-  return sortedByUpdated[0]?.id || validTrips[0]?.id || 'trip-1790572819913';
+  return sortedByUpdated[0]?.id || validTrips[0]?.id || '';
 };
 
 const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
@@ -101,7 +101,7 @@ const sortTripsWithOrder = (tripsToSort: Trip[], order?: string[]): Trip[] => {
 };
 
 const DEFAULT_STARTER_TRIP: Trip = {
-  id: 'trip-1790572819913',
+  id: 'trip-starter',
   title: '새 여행 일정',
   destination: '여행지',
   startDate: new Date().toISOString().split('T')[0],
@@ -419,10 +419,15 @@ export default function App() {
       await saveTripsToIDB(currentTrips).catch(() => {});
       await saveTripBackup(timestampedTrip).catch(() => {});
 
-      // 3. Update brand settings with this activeTripId and put it at the front of tripOrder
-      const updatedOrder = [timestampedTrip.id, ...tripOrderRef.current.filter((id) => id !== timestampedTrip.id)];
-      setTripOrder(updatedOrder);
-      tripOrderRef.current = updatedOrder;
+      // 3. Preserve user's configured trip order — NEVER forcefully move active trip to front!
+      const currentOrder = tripOrderRef.current && tripOrderRef.current.length > 0
+        ? tripOrderRef.current
+        : currentTrips.map((t) => t.id);
+      const preservedOrder = currentOrder.includes(timestampedTrip.id)
+        ? currentOrder
+        : [...currentOrder, timestampedTrip.id];
+      setTripOrder(preservedOrder);
+      tripOrderRef.current = preservedOrder;
 
       await saveBrandSettingsToFirestore({
         title: brandTitle,
@@ -430,7 +435,7 @@ export default function App() {
         badge: brandBadge,
         tabOrder,
         adminPassword: adminPassword || '1205',
-        tripOrder: updatedOrder,
+        tripOrder: preservedOrder,
         activeTripId: timestampedTrip.id
       }, true);
 
@@ -475,8 +480,9 @@ export default function App() {
       badge,
       tabOrder: orderToSave,
       adminPassword,
-      tripOrder
-    });
+      tripOrder: tripOrderRef.current,
+      activeTripId
+    }, true);
   };
 
   const handleSavePassword = (newPw: string) => {
@@ -487,8 +493,9 @@ export default function App() {
       badge: brandBadge,
       tabOrder,
       adminPassword: newPw,
-      tripOrder
-    });
+      tripOrder: tripOrderRef.current,
+      activeTripId
+    }, true);
   };
 
   const handleResetBrand = () => {
@@ -507,26 +514,51 @@ export default function App() {
     setAdminPassword(defaults.adminPassword);
     setTripOrder([]);
     tripOrderRef.current = [];
-    saveBrandSettingsToFirestore(defaults);
+    saveBrandSettingsToFirestore(defaults, true);
   };
 
   // Trip Order Reordering Handler
-  const handleSaveTripOrder = (newOrderedTrips: Trip[]) => {
+  const handleSaveTripOrder = async (newOrderedTrips: Trip[]) => {
     const newOrderIds = newOrderedTrips.map((t) => t.id);
     setTrips(newOrderedTrips);
     setTripOrder(newOrderIds);
     tripOrderRef.current = newOrderIds;
 
-    saveBrandSettingsToFirestore({
+    // 1. Immediately persist new trips order to localStorage & IDB
+    saveTripsToLocalStorage(newOrderedTrips);
+    saveTripsToIDB(newOrderedTrips).catch(() => {});
+
+    // 2. Sync ordered trips to Server Hub so data/trips.json reflects the new order
+    syncAllTripsToServer(newOrderedTrips).catch(() => {});
+
+    const topTripId = newOrderIds[0];
+
+    // 3. Save brand settings with forceDirect = true to guarantee instant cloud & server persistence
+    await saveBrandSettingsToFirestore({
       title: brandTitle,
       subtitle: brandSubtitle,
       badge: brandBadge,
       tabOrder,
       adminPassword,
-      tripOrder: newOrderIds
-    });
+      tripOrder: newOrderIds,
+      activeTripId: topTripId
+    }, true);
 
-    setToastMessage('여행 순서가 저장되었습니다');
+    // 4. Update active trip & URL so refreshing the browser immediately honors the new first trip
+    if (topTripId) {
+      cloudActiveTripIdRef.current = topTripId;
+      setActiveTripId(topTripId);
+      try {
+        localStorage.setItem(STORAGE_LAST_TRIP_KEY, topTripId);
+        if (typeof window !== 'undefined') {
+          const url = new URL(window.location.href);
+          url.searchParams.set('trip', topTripId);
+          window.history.replaceState({}, '', url.toString());
+        }
+      } catch (e) {}
+    }
+
+    setToastMessage('여행 순서가 성공적으로 저장되었습니다!');
     setTimeout(() => {
       setToastMessage(null);
     }, 3000);

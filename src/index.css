@@ -1,16 +1,4 @@
 @import "tailwindcss";
-/* 화면 하단 모든 Netlify 관련 요소 강제 차단 */
-iframe[src*="netlify"],
-#netlify-modal-root,
-net-lify-drawer,
-[data-netlify-deploy-id],
-div[style*="bottom"] {
-  display: none !important;
-  visibility: hidden !important;
-  opacity: 0 !important;
-  pointer-events: none !important;
-  z-index: -999999 !important;
-}
 
 @layer utilities {
   /* Hide scrollbar for clean horizontal swiping on mobile */

@@ -159,9 +159,12 @@ app.get('/api/sync/brand', (_req, res) => {
 });
 
 app.post('/api/sync/brand', (req, res) => {
-  const brand = req.body;
+  const brand = req.body || {};
+  if (!brand.updatedAt) {
+    brand.updatedAt = Date.now();
+  }
   writeBrandFile(brand);
-  broadcastSSE({ type: 'brand_updated', brand, updatedAt: Date.now() });
+  broadcastSSE({ type: 'brand_updated', brand, updatedAt: brand.updatedAt });
   res.json({ success: true });
 });
 
