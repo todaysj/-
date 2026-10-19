@@ -48,4 +48,10 @@ html, body {
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
+}/* Netlify 뱃지 강제 숨김 */
+net-lify-drawer,
+#netlify-modal-root,
+[data-netlify-deploy-id] {
+  display: none !important;
 }
+

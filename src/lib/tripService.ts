@@ -150,8 +150,19 @@ export function notifyFirestoreError(userFriendlyMsg: string, rawError?: any) {
 // Pending trip writes debounce trackers & payload deduplication cache
 const pendingTripWrites = new Map<string, ReturnType<typeof setTimeout>>();
 const lastWrittenTripHash = new Map<string, string>();
+const lastWrittenContentFingerprint = new Map<string, string>();
 let pendingBrandTimer: ReturnType<typeof setTimeout> | null = null;
 let lastWrittenBrandHash = '';
+
+/**
+ * Hash only the actual functional trip content, ignoring transient updatedAt timestamps.
+ * This guarantees zero cloud writes if the trip contents did not actually change.
+ */
+export function getTripContentFingerprint(trip: Trip | null | undefined): string {
+  if (!trip) return '';
+  const { updatedAt, ...rest } = trip as any;
+  return JSON.stringify(rest);
+}
 
 export function removeUndefinedDeep<T>(obj: T): T {
   if (obj === null || obj === undefined) {
@@ -524,6 +535,13 @@ export async function syncBrandToServer(brand: any): Promise<boolean> {
  * Save trip to local cache, IndexedDB backup history, and direct to Server & Firestore
  */
 export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false): Promise<void> {
+  const contentFingerprint = getTripContentFingerprint(trip);
+
+  // If content has not changed at all and this is an automatic background write, completely skip!
+  if (!forceDirectWrite && lastWrittenContentFingerprint.get(trip.id) === contentFingerprint) {
+    return;
+  }
+
   const timestampedTrip: Trip = {
     ...trip,
     updatedAt: Date.now()
@@ -552,15 +570,6 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     console.error('상세 에러 (saveTripToFirestore local cache):', err);
   }
 
-  updateSyncStatus('saving', '데이터 동기화 중...');
-
-  // Fallback safety watchdog: never leave status stuck on 'saving' indefinitely
-  const watchdog = setTimeout(() => {
-    if (currentSyncStatus.status === 'saving') {
-      updateSyncStatus('synced', '실시간 동기화됨');
-    }
-  }, 1000);
-
   // 4. Prepare clean, lightweight trip: extract heavy photos to local photo store if needed
   let cleanTrip: Trip;
   try {
@@ -573,20 +582,28 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
 
   // Direct immediate write if requested (e.g., manual save button, backup restore, new trip creation)
   if (forceDirectWrite) {
+    updateSyncStatus('saving', '데이터 저장 중...');
+    const watchdog = setTimeout(() => {
+      if (currentSyncStatus.status === 'saving') {
+        updateSyncStatus('synced', '실시간 동기화됨');
+      }
+    }, 1200);
+
     try {
       const payloadHash = JSON.stringify(safePayload);
 
       // Primary: Immediate write to Server Hub (instant persistence + SSE broadcast to all other phones & PCs)
       const serverSyncPromise = syncTripToServer(safePayload);
 
-      // Secondary: Best-effort write to Firestore with 1200ms non-blocking timeout
+      // Secondary: Best-effort write to Firestore with 1500ms non-blocking timeout
       const firestorePromise = setDoc(doc(db, TRIPS_COLLECTION, safePayload.id), safePayload, { merge: true })
         .catch((fsErr) => {
           console.warn('[TripService] Secondary Firestore direct write notice:', fsErr?.message || fsErr);
         });
-      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1200));
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1500));
 
       await Promise.allSettled([serverSyncPromise, Promise.race([firestorePromise, timeoutPromise])]);
+      lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
@@ -600,22 +617,29 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     return;
   }
 
-  // Debounced write for real-time keystroke/checkbox edits
+  // Debounced write for real-time keystroke/checkbox edits (1500ms calm-down period)
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
   }
 
   const timer = setTimeout(async () => {
-    const payloadHash = JSON.stringify(safePayload);
-    if (lastWrittenTripHash.get(cleanTrip.id) === payloadHash) {
-      clearTimeout(watchdog);
+    // Check fingerprint again before issuing write
+    if (lastWrittenContentFingerprint.get(cleanTrip.id) === contentFingerprint) {
       pendingTripWrites.delete(cleanTrip.id);
-      updateSyncStatus('synced', '실시간 동기화됨');
       return;
     }
 
+    updateSyncStatus('saving', '데이터 동기화 중...');
+    const watchdog = setTimeout(() => {
+      if (currentSyncStatus.status === 'saving') {
+        updateSyncStatus('synced', '실시간 동기화됨');
+      }
+    }, 1200);
+
     try {
+      const payloadHash = JSON.stringify(safePayload);
+
       // 1. Sync to Server Hub
       syncTripToServer(safePayload).catch((e) => console.warn('Server background sync error:', e));
 
@@ -625,8 +649,9 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
         console.warn('Background Firestore write notice:', err?.message || err);
       });
 
-      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 600));
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 1000));
       await Promise.race([writePromise, timeoutPromise]);
+      lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
       updateSyncStatus('synced', '실시간 동기화됨');
@@ -637,7 +662,7 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
-  }, 250);
+  }, 1500);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
@@ -746,13 +771,7 @@ export function subscribeToTrips(
           ...local,
           title: cleanTripTitle(local.title)
         });
-        localHasNewer = true;
       }
-    }
-
-    // If local has newer edits or restored backup, push to server so all other devices receive it!
-    if (localHasNewer) {
-      syncAllTripsToServer(finalTrips).catch(() => {});
     }
 
     // Save authoritative state to local storage & IndexedDB
@@ -1006,6 +1025,12 @@ export async function saveBrandSettingsToFirestore(
     safeLocalStorageSet('jplanner_site_password', settings.adminPassword);
   }
 
+  const safeSettings = removeUndefinedDeep(settings);
+  const hash = JSON.stringify(safeSettings);
+  if (lastWrittenBrandHash === hash && !forceDirect) {
+    return;
+  }
+
   updateSyncStatus('saving', '설정 동기화 중...');
 
   // 1. Immediately sync to Server Hub (instantly broadcasts to all devices via SSE)
@@ -1018,8 +1043,6 @@ export async function saveBrandSettingsToFirestore(
 
   const writeSettings = async () => {
     try {
-      const safeSettings = removeUndefinedDeep(settings);
-      const hash = JSON.stringify(safeSettings);
       if (lastWrittenBrandHash === hash) {
         updateSyncStatus('synced', '실시간 동기화됨');
         return;
@@ -1041,7 +1064,7 @@ export async function saveBrandSettingsToFirestore(
     pendingBrandTimer = setTimeout(async () => {
       pendingBrandTimer = null;
       await writeSettings();
-    }, 300);
+    }, 1000);
   }
 }
 

@@ -241,27 +241,13 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
 
-  // Auto-resolve any photo:// references and auto-recover missing photos from backups/cache
+  // Load and cache full HD photos into local photoStore without re-triggering cloud writes
   useEffect(() => {
     let isMounted = true;
 
-    // 1. Resolve photo:// references to full HD images
-    resolveTripPhotos(trip).then((resolved) => {
-      if (isMounted && resolved) {
-        const hasDiff = JSON.stringify(resolved) !== JSON.stringify(trip);
-        if (hasDiff) {
-          onUpdateTrip(resolved);
-        }
-      }
-    });
-
-    // 2. Scan and recover any lost photos from IndexedDB backups, cache, and photoStore
-    recoverAllTripPhotos(trip).then(({ trip: recoveredTrip, recoveredCount }) => {
-      if (isMounted && recoveredCount > 0) {
-        onUpdateTrip(recoveredTrip);
-        setRecoveryBanner(`기념품 사진 ${recoveredCount}장이 캐시/백업에서 성공적으로 복구되었습니다.`);
-        setTimeout(() => setRecoveryBanner(null), 5000);
-      }
+    // Prefetch photo:// references in background so AsyncImage renders instantly
+    resolveTripPhotos(trip).catch((err) => {
+      console.warn('Background photo prefetch notice:', err);
     });
 
     return () => {

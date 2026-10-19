@@ -277,7 +277,7 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isTripOrderModalOpen, setIsTripOrderModalOpen] = useState(false);
 
-  // Helper to switch active trip, sync URL and save to localStorage
+  // Helper to switch active trip, sync URL and save to localStorage (Zero cloud writes on tab switch)
   const handleSelectTrip = (tripId: string) => {
     userExplicitlySelectedRef.current = true;
     cloudActiveTripIdRef.current = tripId;
@@ -290,17 +290,6 @@ export default function App() {
         window.history.replaceState({}, '', url.toString());
       }
     } catch (e) {}
-
-    // Synchronize active trip to Cloud settings so all devices automatically open this trip
-    saveBrandSettingsToFirestore({
-      title: brandTitle,
-      subtitle: brandSubtitle,
-      badge: brandBadge,
-      tabOrder,
-      adminPassword,
-      tripOrder: tripOrderRef.current,
-      activeTripId: tripId
-    });
   };
 
   // Real-time Firestore sync for Trips
