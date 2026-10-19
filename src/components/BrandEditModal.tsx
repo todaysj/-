@@ -84,7 +84,7 @@ interface BrandEditModalProps {
   currentPassword?: string;
   trips?: Trip[];
   onClose: () => void;
-  onSave: (title: string, subtitle: string, badge: string, tabOrder: TabType[]) => void;
+  onSave: (title: string, subtitle: string, badge: string, tabOrder: TabType[], newActiveTripId?: string) => void;
   onReset: () => void;
   onSavePassword?: (newPassword: string) => void;
   onSaveTripOrder?: (newOrderedTrips: Trip[]) => void;
@@ -183,13 +183,15 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
+    let newTopTripId: string | undefined = undefined;
     if (onSaveTripOrder) {
       const orderChanged = JSON.stringify(orderedTrips.map((t) => t.id)) !== JSON.stringify(trips.map((t) => t.id));
       if (orderChanged) {
         onSaveTripOrder(orderedTrips);
+        newTopTripId = orderedTrips[0]?.id;
       }
     }
-    onSave(title.trim(), subtitle.trim(), '', tabOrder);
+    onSave(title.trim(), subtitle.trim(), '', tabOrder, newTopTripId);
     onClose();
   };
 

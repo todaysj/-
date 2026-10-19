@@ -19,13 +19,49 @@ if (!fs.existsSync(DATA_DIR)) {
 
 const TRIPS_FILE = path.join(DATA_DIR, 'trips.json');
 const BRAND_FILE = path.join(DATA_DIR, 'brand.json');
+const DELETED_TRIPS_FILE = path.join(DATA_DIR, 'deleted_trips.json');
+
+function readDeletedTrips(): string[] {
+  try {
+    if (fs.existsSync(DELETED_TRIPS_FILE)) {
+      const content = fs.readFileSync(DELETED_TRIPS_FILE, 'utf-8');
+      const parsed = JSON.parse(content);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.error('Error reading deleted_trips.json:', err);
+  }
+  return [];
+}
+
+function writeDeletedTrips(ids: string[]) {
+  try {
+    const unique = Array.from(new Set(ids));
+    fs.writeFileSync(DELETED_TRIPS_FILE, JSON.stringify(unique, null, 2), 'utf-8');
+  } catch (err) {
+    console.error('Error writing deleted_trips.json:', err);
+  }
+}
 
 function readTripsFile(): any[] {
   try {
     if (fs.existsSync(TRIPS_FILE)) {
       const content = fs.readFileSync(TRIPS_FILE, 'utf-8');
       const parsed = JSON.parse(content);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed)) {
+        const deletedSet = new Set(readDeletedTrips());
+        const valid = parsed.filter((t) => t && t.id && !deletedSet.has(t.id));
+        const brand = readBrandFile();
+        if (brand && Array.isArray(brand.tripOrder) && brand.tripOrder.length > 0) {
+          const orderMap = new Map(brand.tripOrder.map((id: string, idx: number) => [id, idx]));
+          return valid.sort((a, b) => {
+            const idxA = orderMap.has(a.id) ? (orderMap.get(a.id) as number) : 9999;
+            const idxB = orderMap.has(b.id) ? (orderMap.get(b.id) as number) : 9999;
+            return idxA - idxB;
+          });
+        }
+        return valid;
+      }
     }
   } catch (err) {
     console.error('Error reading trips.json:', err);
@@ -35,7 +71,18 @@ function readTripsFile(): any[] {
 
 function writeTripsFile(trips: any[]) {
   try {
-    fs.writeFileSync(TRIPS_FILE, JSON.stringify(trips, null, 2), 'utf-8');
+    const deletedSet = new Set(readDeletedTrips());
+    const valid = Array.isArray(trips) ? trips.filter((t) => t && t.id && !deletedSet.has(t.id)) : [];
+    const brand = readBrandFile();
+    if (brand && Array.isArray(brand.tripOrder) && brand.tripOrder.length > 0) {
+      const orderMap = new Map(brand.tripOrder.map((id: string, idx: number) => [id, idx]));
+      valid.sort((a, b) => {
+        const idxA = orderMap.has(a.id) ? (orderMap.get(a.id) as number) : 9999;
+        const idxB = orderMap.has(b.id) ? (orderMap.get(b.id) as number) : 9999;
+        return idxA - idxB;
+      });
+    }
+    fs.writeFileSync(TRIPS_FILE, JSON.stringify(valid, null, 2), 'utf-8');
   } catch (err) {
     console.error('Error writing trips.json:', err);
   }
@@ -92,7 +139,7 @@ app.get('/api/sync/stream', (req, res) => {
   // Immediately send initial payload
   const trips = readTripsFile();
   const brand = readBrandFile();
-  res.write(`data: ${JSON.stringify({ type: 'initial', trips, brand, updatedAt: Date.now() })}\n\n`);
+  res.write(`data: ${JSON.stringify({ type: 'initial', trips, brand, deletedTripIds: readDeletedTrips(), updatedAt: Date.now() })}\n\n`);
 
   const keepAlive = setInterval(() => {
     try {
@@ -117,14 +164,20 @@ app.get('/api/sync/trips', (_req, res) => {
   });
 });
 
+app.get('/api/sync/deleted_trips', (_req, res) => {
+  res.json({ deletedTripIds: readDeletedTrips() });
+});
+
 app.post('/api/sync/trips', (req, res) => {
   const incoming = req.body;
   if (!Array.isArray(incoming)) {
     return res.status(400).json({ error: 'Expected an array of trips' });
   }
-  writeTripsFile(incoming);
-  broadcastSSE({ type: 'trips_updated', trips: incoming, updatedAt: Date.now() });
-  res.json({ success: true, count: incoming.length });
+  const deletedSet = new Set(readDeletedTrips());
+  const valid = incoming.filter((t) => t && t.id && !deletedSet.has(t.id));
+  writeTripsFile(valid);
+  broadcastSSE({ type: 'trips_updated', trips: valid, updatedAt: Date.now() });
+  res.json({ success: true, count: valid.length });
 });
 
 app.post('/api/sync/trip', (req, res) => {
@@ -132,12 +185,16 @@ app.post('/api/sync/trip', (req, res) => {
   if (!singleTrip || !singleTrip.id) {
     return res.status(400).json({ error: 'Invalid trip payload' });
   }
+  const deletedSet = new Set(readDeletedTrips());
+  if (deletedSet.has(singleTrip.id)) {
+    return res.json({ success: false, ignored: true, reason: 'Trip was permanently deleted' });
+  }
   const trips = readTripsFile();
   const index = trips.findIndex((t) => t.id === singleTrip.id);
   if (index >= 0) {
     trips[index] = singleTrip;
   } else {
-    trips.unshift(singleTrip);
+    trips.push(singleTrip);
   }
   writeTripsFile(trips);
   broadcastSSE({ type: 'trips_updated', trips, updatedAt: Date.now() });
@@ -146,11 +203,26 @@ app.post('/api/sync/trip', (req, res) => {
 
 app.delete('/api/sync/trip/:id', (req, res) => {
   const tripId = req.params.id;
-  const trips = readTripsFile();
-  const filtered = trips.filter((t) => t.id !== tripId);
-  writeTripsFile(filtered);
-  broadcastSSE({ type: 'trips_updated', trips: filtered, updatedAt: Date.now() });
-  res.json({ success: true, remaining: filtered.length });
+  const deleted = readDeletedTrips();
+  if (!deleted.includes(tripId)) {
+    deleted.push(tripId);
+    writeDeletedTrips(deleted);
+  }
+  const trips = readTripsFile().filter((t) => t.id !== tripId);
+  writeTripsFile(trips);
+
+  // Synchronize brand tripOrder
+  const brand = readBrandFile();
+  if (brand && Array.isArray(brand.tripOrder)) {
+    brand.tripOrder = brand.tripOrder.filter((id: string) => id !== tripId);
+    if (brand.activeTripId === tripId) {
+      brand.activeTripId = trips[0]?.id || '';
+    }
+    writeBrandFile(brand);
+  }
+
+  broadcastSSE({ type: 'trips_updated', trips, deletedTripId: tripId, updatedAt: Date.now() });
+  res.json({ success: true, remaining: trips.length });
 });
 
 app.get('/api/sync/brand', (_req, res) => {

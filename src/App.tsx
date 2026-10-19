@@ -33,6 +33,8 @@ import {
   subscribeToSyncStatus,
   subscribeToFirestoreErrors,
   isQuotaExceeded,
+  markTripAsDeleted,
+  getDeletedTripIds,
   SyncStatus
 } from './lib/tripService';
 import { getAllLocalPhotos, savePhotoToCloud } from './utils/photoStore';
@@ -792,24 +794,26 @@ export default function App() {
       saveTripToFirestore(fallbackTrip);
     } else {
       setTrips(remainingTrips);
+      saveTripsToLocalStorage(remainingTrips);
+      saveTripsToIDB(remainingTrips).catch(() => {});
+      syncAllTripsToServer(remainingTrips).catch(() => {});
       if (activeTripId === tripIdToDelete) {
         handleSelectTrip(remainingTrips[0].id);
       }
     }
 
-    if (tripOrder.length > 0) {
-      const updatedOrder = tripOrder.filter((id) => id !== tripIdToDelete);
-      setTripOrder(updatedOrder);
-      tripOrderRef.current = updatedOrder;
-      saveBrandSettingsToFirestore({
-        title: brandTitle,
-        subtitle: brandSubtitle,
-        badge: brandBadge,
-        tabOrder,
-        adminPassword,
-        tripOrder: updatedOrder
-      });
-    }
+    const updatedOrder = tripOrderRef.current.filter((id) => id !== tripIdToDelete);
+    setTripOrder(updatedOrder);
+    tripOrderRef.current = updatedOrder;
+    saveBrandSettingsToFirestore({
+      title: brandTitle,
+      subtitle: brandSubtitle,
+      badge: brandBadge,
+      tabOrder,
+      adminPassword,
+      tripOrder: updatedOrder,
+      activeTripId: remainingTrips[0]?.id
+    }, true);
 
     // Show delete complete message
     setToastMessage('여행이 삭제되었습니다');

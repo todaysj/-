@@ -98,7 +98,7 @@ export function countTotalChecklist(trip: Trip): number {
 }
 
 /**
- * Save current trips list to IndexedDB
+ * Save current trips list to IndexedDB (syncs exact list, removing any deleted trips)
  */
 export async function saveTripsToIDB(trips: Trip[]): Promise<void> {
   try {
@@ -108,6 +108,7 @@ export async function saveTripsToIDB(trips: Trip[]): Promise<void> {
     return new Promise((resolve) => {
       const tx = db.transaction([STORE_TRIPS], 'readwrite');
       const store = tx.objectStore(STORE_TRIPS);
+      store.clear();
       for (const trip of trips) {
         store.put(trip);
       }
@@ -116,6 +117,26 @@ export async function saveTripsToIDB(trips: Trip[]): Promise<void> {
     });
   } catch (err) {
     console.warn('[JPlanner] Error saving trips to IndexedDB:', err);
+  }
+}
+
+/**
+ * Delete a specific trip from IndexedDB
+ */
+export async function deleteTripFromIDB(tripId: string): Promise<void> {
+  try {
+    const db = await getTripsDB();
+    if (!db) return;
+
+    return new Promise((resolve) => {
+      const tx = db.transaction([STORE_TRIPS], 'readwrite');
+      const store = tx.objectStore(STORE_TRIPS);
+      store.delete(tripId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch (err) {
+    console.warn('[JPlanner] Error deleting trip from IndexedDB:', err);
   }
 }
 

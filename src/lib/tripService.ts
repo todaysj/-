@@ -5,12 +5,43 @@ import { INITIAL_TRIPS } from '../data/mockData';
 import { detachTripPhotos, resolveTripPhotos } from '../utils/imageUtils';
 import { getTripSouvenirTabs, getTripChecklistTabs, unionSouvenirItems, DEFAULT_PACKING_CATEGORIES, DEFAULT_SOUVENIR_TAGS } from '../utils/tabUtils';
 import { cleanTripTitle } from '../utils/dateUtils';
-import { saveTripBackup, saveTripsToIDB, getTripsFromIDB } from '../utils/tripIndexedDB';
+import { saveTripBackup, saveTripsToIDB, getTripsFromIDB, deleteTripFromIDB } from '../utils/tripIndexedDB';
 import { savePhotoLocal, generatePhotoId } from '../utils/photoStore';
 
 const TRIPS_COLLECTION = 'trips';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
 const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
+const STORAGE_DELETED_TRIPS_KEY = 'jplanner_deleted_trip_ids';
+
+const deletedTripIdsMemorySet = new Set<string>(['test_sync']);
+
+export function getDeletedTripIds(): Set<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_DELETED_TRIPS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((id) => {
+          if (id) deletedTripIdsMemorySet.add(id);
+        });
+      }
+    }
+  } catch {}
+  return new Set(deletedTripIdsMemorySet);
+}
+
+export function isTripDeleted(tripId: string): boolean {
+  if (!tripId) return false;
+  return getDeletedTripIds().has(tripId);
+}
+
+export function markTripAsDeleted(tripId: string): void {
+  if (!tripId) return;
+  try {
+    deletedTripIdsMemorySet.add(tripId);
+    safeLocalStorageSet(STORAGE_DELETED_TRIPS_KEY, JSON.stringify(Array.from(deletedTripIdsMemorySet)));
+  } catch {}
+}
 
 export type SyncStatus = 'connecting' | 'synced' | 'saving' | 'error' | 'local-saved';
 
@@ -256,20 +287,34 @@ export function safeLocalStorageSet(key: string, value: string): boolean {
  */
 export function getStoredTrips(): Trip[] {
   try {
+    const deletedSet = getDeletedTripIds();
     const cached = localStorage.getItem(STORAGE_TRIPS_KEY);
     if (cached !== null) {
       const parsed = JSON.parse(cached);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((t) => ({
-          ...t,
-          title: cleanTripTitle(t.title)
-        }));
+        const validTrips = parsed
+          .filter((t) => t && t.id && !deletedSet.has(t.id) && !t.isDeleted)
+          .map((t) => ({
+            ...t,
+            title: cleanTripTitle(t.title)
+          }));
+
+        const brand = getStoredBrandSettings();
+        if (brand && Array.isArray(brand.tripOrder) && brand.tripOrder.length > 0) {
+          const orderMap = new Map(brand.tripOrder.map((id, index) => [id, index]));
+          return validTrips.sort((a, b) => {
+            const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 9999;
+            const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 9999;
+            return idxA - idxB;
+          });
+        }
+        return validTrips;
       }
     }
   } catch (error) {
     // Graceful fallback
   }
-  return INITIAL_TRIPS;
+  return [];
 }
 
 /**
@@ -534,7 +579,14 @@ export async function syncBrandToServer(brand: any): Promise<boolean> {
 /**
  * Save trip to local cache, IndexedDB backup history, and direct to Server & Firestore
  */
+/**
+ * Save trip to local cache, IndexedDB backup history, and direct to Server & Firestore
+ */
 export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false): Promise<void> {
+  if (!trip || !trip.id || isTripDeleted(trip.id) || (trip as any).isDeleted) {
+    return;
+  }
+
   const contentFingerprint = getTripContentFingerprint(trip);
 
   // If content has not changed at all and this is an automatic background write, completely skip!
@@ -555,7 +607,7 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     console.error('상세 에러 (saveTripBackup):', err);
   });
 
-  // 3. Synchronously update browser cache & IndexedDB with full data for instant local response
+  // 3. Synchronously update browser cache & IndexedDB with full data for instant local response (0ms)
   try {
     const currentTrips = getStoredTrips();
     const exists = currentTrips.some((t) => t.id === timestampedTrip.id);
@@ -585,7 +637,7 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
     updateSyncStatus('saving', '데이터 저장 중...');
     const watchdog = setTimeout(() => {
       if (currentSyncStatus.status === 'saving') {
-        updateSyncStatus('synced', '실시간 동기화됨');
+        updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
       }
     }, 1200);
 
@@ -606,34 +658,36 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
       lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
-      updateSyncStatus('synced', '실시간 동기화됨');
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
     } catch (err: any) {
       clearTimeout(watchdog);
       console.warn('Direct save notice:', err);
-      updateSyncStatus('synced', '실시간 동기화됨');
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
     return;
   }
 
-  // Debounced write for real-time keystroke/checkbox edits (1500ms calm-down period)
+  // Fast-debounced write for real-time keystroke/checkbox edits (350ms responsive calm-down)
   const existingTimer = pendingTripWrites.get(cleanTrip.id);
   if (existingTimer) {
     clearTimeout(existingTimer);
   }
 
+  updateSyncStatus('saving', '자동저장 중...');
+
   const timer = setTimeout(async () => {
     // Check fingerprint again before issuing write
     if (lastWrittenContentFingerprint.get(cleanTrip.id) === contentFingerprint) {
       pendingTripWrites.delete(cleanTrip.id);
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
       return;
     }
 
-    updateSyncStatus('saving', '데이터 동기화 중...');
     const watchdog = setTimeout(() => {
       if (currentSyncStatus.status === 'saving') {
-        updateSyncStatus('synced', '실시간 동기화됨');
+        updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
       }
     }, 1200);
 
@@ -654,15 +708,15 @@ export async function saveTripToFirestore(trip: Trip, forceDirectWrite = false):
       lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
-      updateSyncStatus('synced', '실시간 동기화됨');
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
     } catch (err: any) {
       clearTimeout(watchdog);
       console.warn('[TripService] Background write catch:', err);
-      updateSyncStatus('synced', '실시간 동기화됨');
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
-  }, 1500);
+  }, 350);
 
   pendingTripWrites.set(cleanTrip.id, timer);
 }
@@ -677,15 +731,19 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
     pendingTripWrites.delete(tripId);
   }
   lastWrittenTripHash.delete(tripId);
+  lastWrittenContentFingerprint.delete(tripId);
+
+  // Permanently mark as deleted so no background snapshot or sync can ever revive it
+  markTripAsDeleted(tripId);
 
   // 1. Immediately update browser cache and IndexedDB
   try {
-    const currentTrips = getStoredTrips();
-    const updatedTrips = currentTrips.filter((t) => t.id !== tripId);
-    saveTripsToLocalStorage(updatedTrips);
-    saveTripsToIDB(updatedTrips).catch((err) => {
+    const currentTrips = getStoredTrips().filter((t) => t.id !== tripId);
+    saveTripsToLocalStorage(currentTrips);
+    saveTripsToIDB(currentTrips).catch((err) => {
       console.error('상세 에러 (deleteTrip IDB):', err);
     });
+    deleteTripFromIDB(tripId).catch(() => {});
   } catch (err) {
     console.error('상세 에러 (deleteTrip local cache):', err);
   }
@@ -695,13 +753,14 @@ export async function deleteTripFromFirestore(tripId: string): Promise<void> {
   // 2. Delete from Server Hub (instantly broadcasts deletion to all devices via SSE)
   deleteTripFromServer(tripId).catch((e) => console.warn('Server delete error:', e));
 
-  // 3. Delete from Firestore (best-effort)
+  // 3. Mark tombstone and delete from Firestore (best-effort)
   try {
+    await setDoc(doc(db, TRIPS_COLLECTION, tripId), { id: tripId, isDeleted: true, updatedAt: Date.now() }, { merge: true }).catch(() => {});
     await deleteDoc(doc(db, TRIPS_COLLECTION, tripId));
-    updateSyncStatus('synced', '실시간 동기화됨');
+    updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
   } catch (err: any) {
     console.warn('Firestore delete notice:', err);
-    updateSyncStatus('synced', '실시간 동기화됨');
+    updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
   }
 }
 
@@ -717,10 +776,22 @@ export function subscribeToTrips(
   let isSubscribed = true;
   updateSyncStatus('connecting', '클라우드 동기화 연결 중...');
 
+  // 0. Fetch latest deleted trips list from Server Hub immediately
+  fetch('/api/sync/deleted_trips')
+    .then((res) => res.json())
+    .then((data) => {
+      if (data && Array.isArray(data.deletedTripIds)) {
+        data.deletedTripIds.forEach((id: string) => markTripAsDeleted(id));
+      }
+    })
+    .catch(() => {});
+
   // 1. Immediately serve latest from IndexedDB / localStorage for 0ms initial render
   getTripsFromIDB().then((idbTrips) => {
     if (!isSubscribed) return;
-    const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+    const deletedSet = getDeletedTripIds();
+    const filteredIdb = idbTrips ? idbTrips.filter((t) => t && t.id && !deletedSet.has(t.id)) : null;
+    const initial = filteredIdb && filteredIdb.length > 0 ? filteredIdb : getStoredTrips();
     if (initial && initial.length > 0) {
       onUpdate(initial);
     }
@@ -732,6 +803,9 @@ export function subscribeToTrips(
   const handleIncomingTrips = async (remoteTrips: Trip[]) => {
     if (!remoteTrips || remoteTrips.length === 0) return;
 
+    const deletedSet = getDeletedTripIds();
+    const cleanRemote = remoteTrips.filter((t) => t && t.id && !deletedSet.has(t.id) && !(t as any).isDeleted);
+
     let localTrips: Trip[] = [];
     try {
       const idbTrips = await getTripsFromIDB();
@@ -739,12 +813,14 @@ export function subscribeToTrips(
     } catch {
       localTrips = getStoredTrips();
     }
+    localTrips = localTrips.filter((t) => t && t.id && !deletedSet.has(t.id) && !(t as any).isDeleted);
 
     const finalTrips: Trip[] = [];
     let localHasNewer = false;
 
-    remoteTrips.forEach((remote) => {
+    cleanRemote.forEach((remote) => {
       if (!remote || !remote.id) return;
+      if (deletedSet.has(remote.id) || (remote as any).isDeleted) return;
       const local = localTrips.find((t) => t && t.id === remote.id);
       let chosen: Trip;
       if (!local) {
@@ -764,14 +840,25 @@ export function subscribeToTrips(
       });
     });
 
-    // Always preserve local trips that may not be in remote yet (e.g. backup just restored locally)
+    // Always preserve local trips that may not be in remote yet (strictly never re-add deleted trips)
     for (const local of localTrips) {
-      if (!finalTrips.some((t) => t.id === local.id)) {
+      if (!finalTrips.some((t) => t.id === local.id) && !deletedSet.has(local.id) && !(local as any).isDeleted) {
         finalTrips.push({
           ...local,
           title: cleanTripTitle(local.title)
         });
       }
+    }
+
+    // Sort final trips according to user-configured tripOrder
+    const brand = getStoredBrandSettings();
+    if (brand && Array.isArray(brand.tripOrder) && brand.tripOrder.length > 0) {
+      const orderMap = new Map(brand.tripOrder.map((id, index) => [id, index]));
+      finalTrips.sort((a, b) => {
+        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 9999;
+        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 9999;
+        return idxA - idxB;
+      });
     }
 
     // Save authoritative state to local storage & IndexedDB
@@ -780,18 +867,19 @@ export function subscribeToTrips(
       console.error('상세 에러 (saveTripsToIDB snapshot):', err);
     });
 
-    updateSyncStatus('synced', '실시간 동기화됨');
+    updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
     onUpdate(finalTrips);
 
     // Resolve photos in the background and update state once photos are ready
     resolveTripPhotosList(finalTrips).then((resolved) => {
       if (!isSubscribed) return;
-      saveTripsToIDB(resolved).catch((err) => {
+      const cleanResolved = resolved.filter((t) => t && t.id && !deletedSet.has(t.id) && !(t as any).isDeleted);
+      saveTripsToIDB(cleanResolved).catch((err) => {
         console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
       });
-      const hasChanges = JSON.stringify(resolved) !== JSON.stringify(finalTrips);
+      const hasChanges = JSON.stringify(cleanResolved) !== JSON.stringify(finalTrips);
       if (hasChanges) {
-        onUpdate(resolved);
+        onUpdate(cleanResolved);
       }
     }).catch((photoErr) => {
       console.error('상세 에러 (resolveTripPhotosList):', photoErr);
@@ -808,7 +896,8 @@ export function subscribeToTrips(
       } else {
         // If server is empty on first boot, check if local has trips to seed to server
         getTripsFromIDB().then((idbTrips) => {
-          const initial = idbTrips && idbTrips.length > 0 ? idbTrips : getStoredTrips();
+          const deletedSet = getDeletedTripIds();
+          const initial = idbTrips && idbTrips.length > 0 ? idbTrips.filter((t) => !deletedSet.has(t.id) && !(t as any).isDeleted) : getStoredTrips();
           if (initial && initial.length > 0) {
             syncAllTripsToServer(initial).catch(() => {});
             onUpdate(initial);
@@ -828,6 +917,16 @@ export function subscribeToTrips(
       if (!isSubscribed) return;
       try {
         const payload = JSON.parse(event.data);
+        if (payload.deletedTripId) {
+          markTripAsDeleted(payload.deletedTripId);
+          deleteTripFromIDB(payload.deletedTripId).catch(() => {});
+        }
+        if (Array.isArray(payload.deletedTripIds)) {
+          payload.deletedTripIds.forEach((id: string) => {
+            markTripAsDeleted(id);
+            deleteTripFromIDB(id).catch(() => {});
+          });
+        }
         if (payload.type === 'trips_updated' || payload.type === 'initial') {
           if (Array.isArray(payload.trips)) {
             handleIncomingTrips(payload.trips);
@@ -882,11 +981,22 @@ export function subscribeToTrips(
       (snapshot) => {
         if (!isSubscribed) return;
         if (!snapshot.empty) {
+          const deletedSet = getDeletedTripIds();
           const rawRemoteTrips: Trip[] = [];
           snapshot.forEach((docSnap) => {
-            rawRemoteTrips.push(docSnap.data() as Trip);
+            const data = docSnap.data() as Trip & { isDeleted?: boolean };
+            if (data.isDeleted) {
+              markTripAsDeleted(docSnap.id);
+              deleteTripFromIDB(docSnap.id).catch(() => {});
+              return;
+            }
+            if (!deletedSet.has(docSnap.id) && !isTripDeleted(docSnap.id)) {
+              rawRemoteTrips.push(data);
+            }
           });
-          handleIncomingTrips(rawRemoteTrips);
+          if (rawRemoteTrips.length > 0) {
+            handleIncomingTrips(rawRemoteTrips);
+          }
         }
       },
       (err: any) => {
@@ -980,6 +1090,13 @@ export function subscribeToBrandSettings(
             return;
           }
 
+          if (Array.isArray(data.deletedTripIds)) {
+            data.deletedTripIds.forEach((id: string) => {
+              markTripAsDeleted(id);
+              deleteTripFromIDB(id).catch(() => {});
+            });
+          }
+
           const settings = {
             title: data.title || 'J플래너',
             subtitle: data.subtitle || '스마트 여행 일정 & 예약 보관함',
@@ -988,6 +1105,7 @@ export function subscribeToBrandSettings(
             adminPassword: data.adminPassword || '1205',
             tripOrder: data.tripOrder || undefined,
             activeTripId: data.activeTripId || undefined,
+            deletedTripIds: data.deletedTripIds || undefined,
             updatedAt: remoteUpdated
           };
           safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settings));
@@ -1027,12 +1145,15 @@ export async function saveBrandSettingsToFirestore(
     adminPassword?: string;
     tripOrder?: string[];
     activeTripId?: string;
+    deletedTripIds?: string[];
     updatedAt?: number;
   },
   forceDirect = false
 ) {
+  const currentDeleted = Array.from(getDeletedTripIds());
   const settingsWithTimestamp = {
     ...settings,
+    deletedTripIds: Array.from(new Set([...currentDeleted, ...(settings.deletedTripIds || [])])),
     updatedAt: settings.updatedAt || Date.now()
   };
   safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(settingsWithTimestamp));
