@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { Trip, ChecklistTabConfig, SouvenirTabConfig } from '../types';
-import { compressImage } from '../utils/imageUtils';
+import { compressImage, compressAndUploadPhoto } from '../utils/imageUtils';
 import {
   X,
   MapPin,
@@ -140,8 +140,10 @@ export const EditTripModal: React.FC<EditTripModalProps> = ({
 
     setIsUploading(true);
     try {
-      const compressed = await compressImage(file, 1600, 1000, 0.86);
-      setCoverImage(compressed);
+      const uploadRes = await compressAndUploadPhoto(file, trip.id, 'cover');
+      if (uploadRes.publicUrl) {
+        setCoverImage(uploadRes.publicUrl);
+      }
     } catch (err) {
       alert('이미지 처리 중 오류가 발생했습니다.');
     } finally {

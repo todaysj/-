@@ -24,10 +24,22 @@ import {
   ListOrdered,
   Plane,
   Calendar,
-  Gift
+  Gift,
+  Database,
+  Copy,
+  ExternalLink
 } from 'lucide-react';
 import { TabType, Trip } from '../types';
 import { cleanTripTitle } from '../utils/dateUtils';
+import {
+  getSupabaseCredentials,
+  setSupabaseCredentials,
+  clearSupabaseCredentials,
+  isSupabaseConfigured,
+  SUPABASE_SQL_SCHEMA,
+  getSupabase,
+  SUPABASE_STORAGE_BUCKET
+} from '../lib/supabase';
 
 export const DEFAULT_TAB_ORDER: TabType[] = ['itinerary', 'map', 'reservations', 'budget', 'checklist', 'souvenirs'];
 
@@ -103,7 +115,7 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
   onSavePassword,
   onSaveTripOrder
 }) => {
-  const [activeSection, setActiveSection] = useState<'trips' | 'tabs' | 'brand' | 'security'>('trips');
+  const [activeSection, setActiveSection] = useState<'trips' | 'tabs' | 'brand' | 'security' | 'supabase'>('trips');
   const [title, setTitle] = useState(currentTitle);
   const [subtitle, setSubtitle] = useState(currentSubtitle);
   const [tabOrder, setTabOrder] = useState<TabType[]>(() => {
@@ -114,6 +126,14 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
     }
     return unique;
   });
+
+  // Supabase connection states
+  const [supabaseUrlInput, setSupabaseUrlInput] = useState(() => getSupabaseCredentials().url);
+  const [supabaseKeyInput, setSupabaseKeyInput] = useState(() => getSupabaseCredentials().anonKey);
+  const [supabaseSaved, setSupabaseSaved] = useState(false);
+  const [supabaseCopiedSql, setSupabaseCopiedSql] = useState(false);
+  const [supabaseTestStatus, setSupabaseTestStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+  const [supabaseTestMsg, setSupabaseTestMsg] = useState('');
 
   // Trip ordering states
   const [orderedTrips, setOrderedTrips] = useState<Trip[]>([...trips]);
@@ -251,6 +271,53 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
     }
   };
 
+  const handleSaveSupabase = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSupabaseCredentials(supabaseUrlInput.trim(), supabaseKeyInput.trim());
+    setSupabaseSaved(true);
+    setSupabaseTestStatus('testing');
+    setSupabaseTestMsg('연결 테스트 중...');
+    try {
+      const client = getSupabase();
+      if (!client) {
+        setSupabaseTestStatus('error');
+        setSupabaseTestMsg('Supabase 설정 정보(URL, Key)를 확인해 주세요.');
+      } else {
+        const { error } = await client.from('trips').select('id').limit(1);
+        if (error && error.code !== 'PGRST116') {
+          setSupabaseTestStatus('error');
+          setSupabaseTestMsg(`연결 시도됨 (테이블 확인 필요: ${error.message})`);
+        } else {
+          setSupabaseTestStatus('success');
+          setSupabaseTestMsg('Supabase 연결 성공! 실시간 동기화가 활성화되었습니다.');
+        }
+      }
+    } catch (err: any) {
+      setSupabaseTestStatus('error');
+      setSupabaseTestMsg(`연결 오류: ${err?.message || err}`);
+    }
+    setTimeout(() => setSupabaseSaved(false), 3500);
+  };
+
+  const handleCopySql = () => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard) {
+      navigator.clipboard.writeText(SUPABASE_SQL_SCHEMA).then(() => {
+        setSupabaseCopiedSql(true);
+        setTimeout(() => setSupabaseCopiedSql(false), 3000);
+      });
+    }
+  };
+
+  const handleClearSupabase = () => {
+    if (confirm('Supabase 설정을 초기화하고 로컬 저장 모드로 전환하시겠습니까?')) {
+      clearSupabaseCredentials();
+      setSupabaseUrlInput('');
+      setSupabaseKeyInput('');
+      setSupabaseTestStatus('idle');
+      setSupabaseTestMsg('');
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/75 backdrop-blur-sm animate-fade-in">
       <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-lg overflow-hidden max-h-[92vh] flex flex-col">
@@ -262,7 +329,7 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
             </div>
             <div>
               <h3 className="text-base sm:text-lg font-bold">관리자 설정</h3>
-              <p className="text-[11px] text-slate-400">메인 탭 순서 변경, 사이트 타이틀 & 비밀번호 관리</p>
+              <p className="text-[11px] text-slate-400">메인 탭 순서 변경, 사이트 타이틀, 비밀번호 및 Supabase 연동</p>
             </div>
           </div>
           <button
@@ -331,6 +398,22 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
           >
             <Lock className="w-4 h-4" />
             <span>비밀번호 관리</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSection('supabase')}
+            className={`flex items-center space-x-1.5 py-2.5 px-3 sm:px-4 font-bold text-xs sm:text-sm border-b-2 transition whitespace-nowrap shrink-0 ${
+              activeSection === 'supabase'
+                ? 'border-emerald-600 text-emerald-600 bg-white rounded-t-xl shadow-xs'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
+            }`}
+          >
+            <Database className="w-4 h-4" />
+            <span>Supabase</span>
+            {isSupabaseConfigured() ? (
+              <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block" />
+            ) : null}
           </button>
         </div>
 
@@ -833,6 +916,147 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
                 </div>
               </div>
             </form>
+          )}
+
+          {/* SUPABASE INTEGRATION SECTION */}
+          {activeSection === 'supabase' && (
+            <div className="space-y-4">
+              <div className="bg-emerald-50/80 p-3.5 rounded-xl border border-emerald-100 flex items-start space-x-2.5">
+                <Database className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="text-xs text-emerald-950 leading-relaxed">
+                  <p className="font-bold">Supabase 실시간 클라우드 DB & 스토리지 연동</p>
+                  <p className="mt-0.5 text-emerald-800">
+                    Supabase의 <span className="font-bold">postgres_changes</span> 실시간 채널을 통해 일행 간 일정이 새로고침 없이 즉시 동기화되며, 사진은 <span className="font-bold">jplan-photos</span> 버킷에 500KB 이하로 자동 압축 업로드됩니다.
+                  </p>
+                </div>
+              </div>
+
+              {/* Status Badge */}
+              <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between text-xs">
+                <span className="font-bold text-slate-700">현재 연동 상태:</span>
+                {isSupabaseConfigured() ? (
+                  <span className="inline-flex items-center space-x-1.5 px-2.5 py-1 bg-emerald-100 text-emerald-800 rounded-full font-bold">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    <span>Supabase 활성화됨</span>
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center space-x-1 px-2.5 py-1 bg-slate-200 text-slate-700 rounded-full font-bold">
+                    <span>로컬 & 허브 저장 모드</span>
+                  </span>
+                )}
+              </div>
+
+              {supabaseTestMsg && (
+                <div
+                  className={`p-3 rounded-xl border text-xs font-bold flex items-center space-x-2 animate-fade-in ${
+                    supabaseTestStatus === 'success'
+                      ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                      : supabaseTestStatus === 'error'
+                      ? 'bg-rose-50 border-rose-200 text-rose-800'
+                      : 'bg-sky-50 border-sky-200 text-sky-800'
+                  }`}
+                >
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{supabaseTestMsg}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleSaveSupabase} className="space-y-3.5">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    SUPABASE_URL <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="url"
+                    value={supabaseUrlInput}
+                    onChange={(e) => setSupabaseUrlInput(e.target.value)}
+                    placeholder="https://your-project-id.supabase.co"
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-none"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Supabase 프로젝트 설정(Project Settings) &gt; Data API의 Project URL
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    SUPABASE_ANON_KEY <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="password"
+                    value={supabaseKeyInput}
+                    onChange={(e) => setSupabaseKeyInput(e.target.value)}
+                    placeholder="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+                    className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-mono focus:ring-2 focus:ring-emerald-500 focus:bg-white focus:outline-none"
+                  />
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Project Settings &gt; API의 Project API keys (anon / public)
+                  </p>
+                </div>
+
+                {/* Storage & SQL Info */}
+                <div className="p-3 bg-slate-100/80 rounded-xl border border-slate-200 text-xs text-slate-600 space-y-2">
+                  <div className="flex items-center justify-between font-bold text-slate-800">
+                    <span>💡 Supabase 테이블 및 Storage 준비</span>
+                    <button
+                      type="button"
+                      onClick={handleCopySql}
+                      className="inline-flex items-center space-x-1 px-2.5 py-1 bg-white hover:bg-slate-50 border border-slate-300 text-slate-700 rounded-lg text-[11px] font-bold shadow-xs transition"
+                    >
+                      {supabaseCopiedSql ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-600" />
+                          <span className="text-emerald-700">복사 완료!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>SQL 스키마 복사</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <ul className="list-disc list-inside space-y-1 text-[11px] text-slate-600">
+                    <li>
+                      <span className="font-semibold text-slate-800">Storage 버킷:</span> 버킷 이름 <code className="bg-slate-200 px-1 py-0.5 rounded text-emerald-800 font-mono font-bold">jplan-photos</code> (Public bucket 활성화)
+                    </li>
+                    <li>
+                      <span className="font-semibold text-slate-800">테이블 & Realtime:</span> 위 SQL 스키마를 복사하여 Supabase SQL Editor에서 실행하시면 <code className="bg-slate-200 px-1 py-0.5 rounded font-mono">trips</code>와 <code className="bg-slate-200 px-1 py-0.5 rounded font-mono">settings</code> 테이블 및 실시간 동기화가 설정됩니다.
+                    </li>
+                  </ul>
+                </div>
+
+                {/* Actions */}
+                <div className="pt-3 border-t border-slate-100 flex items-center justify-between gap-3">
+                  <button
+                    type="button"
+                    onClick={handleClearSupabase}
+                    className="inline-flex items-center space-x-1 px-3 py-2 text-xs font-semibold text-slate-500 hover:text-rose-600 bg-slate-100 hover:bg-rose-50 rounded-xl transition"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    <span>초기화</span>
+                  </button>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={onClose}
+                      className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-xl transition"
+                    >
+                      닫기
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={supabaseTestStatus === 'testing'}
+                      className="inline-flex items-center space-x-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl shadow-sm transition disabled:opacity-50"
+                    >
+                      <Check className="w-4 h-4" />
+                      <span>{supabaseTestStatus === 'testing' ? '테스트 중...' : '저장 및 연결 테스트'}</span>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
           )}
 
         </div>

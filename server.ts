@@ -240,6 +240,13 @@ app.post('/api/sync/brand', (req, res) => {
   res.json({ success: true });
 });
 
+app.get('/api/config/supabase', (_req, res) => {
+  res.json({
+    supabaseUrl: process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '',
+    supabaseAnonKey: process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || '',
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Server Bootstrap: Express + Vite Middlewares in Dev, Static in Prod
 // ---------------------------------------------------------------------------

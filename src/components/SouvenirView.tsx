@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Trip, SouvenirItem, SouvenirTabConfig } from '../types';
-import { compressImage, resolveTripPhotos } from '../utils/imageUtils';
+import { compressImage, resolveTripPhotos, compressAndUploadPhoto } from '../utils/imageUtils';
 import {
   Gift,
   Plus,
@@ -559,16 +559,18 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
           alert(`'${file.name}'은(는) 이미지 파일이 아닙니다.`);
           continue;
         }
-        // Compress with optimal HD resolution (max 900px, 0.78 quality) preserving sharp details while keeping file size ultra compact (~25KB)
-        const compressed = await compressImage(file, 900, 900, 0.78);
-        compressedList.push(compressed);
+        // Compress <= 500KB with browser-image-compression & upload to Supabase Storage ('jplan-photos')
+        const uploadResult = await compressAndUploadPhoto(file, trip.id, 'souvenir');
+        if (uploadResult.publicUrl) {
+          compressedList.push(uploadResult.publicUrl);
+        }
       }
 
       if (compressedList.length > 0) {
         setImages((prev) => [...prev, ...compressedList].slice(0, 2));
       }
     } catch (error) {
-      console.error('Image compression failed:', error);
+      console.error('Image upload failed:', error);
       alert('이미지를 처리하는 중 오류가 발생했습니다. 다른 사진을 선택해 주세요.');
     } finally {
       setIsCompressingImage(false);

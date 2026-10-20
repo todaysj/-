@@ -1,11 +1,8 @@
-import { doc, getDoc, setDoc } from 'firebase/firestore';
-import { db } from '../lib/firebase';
-import { isQuotaExceeded, isQuotaError, setQuotaExceeded } from '../lib/tripService';
+import { getSupabase, isSupabaseConfigured } from '../lib/supabase';
 
 const DB_NAME = 'JPlanner_Media_DB';
 const DB_VERSION = 1;
 const STORE_NAME = 'photos';
-const PHOTOS_COLLECTION = 'photos';
 
 // In-memory fallback / instant cache
 const memoryCache = new Map<string, string>();
@@ -39,99 +36,33 @@ function getIDB(): Promise<IDBDatabase | null> {
 }
 
 /**
- * Compress an image dataUrl specifically for cloud document storage (<300KB)
- */
-async function compressForCloudDoc(dataUrl: string): Promise<string> {
-  if (typeof window === 'undefined' || typeof document === 'undefined') return dataUrl;
-  return new Promise((resolve) => {
-    try {
-      const img = new Image();
-      img.onload = () => {
-        try {
-          const maxDim = 800;
-          let w = img.naturalWidth || img.width || 800;
-          let h = img.naturalHeight || img.height || 800;
-          if (w > maxDim || h > maxDim) {
-            if (w > h) {
-              h = Math.round((h * maxDim) / w);
-              w = maxDim;
-            } else {
-              w = Math.round((w * maxDim) / h);
-              h = maxDim;
-            }
-          }
-          const canvas = document.createElement('canvas');
-          canvas.width = Math.max(1, w);
-          canvas.height = Math.max(1, h);
-          const ctx = canvas.getContext('2d');
-          if (!ctx) return resolve(dataUrl);
-          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          let res = canvas.toDataURL('image/webp', 0.75);
-          if (!res.startsWith('data:image/webp') || res.length < 50) {
-            res = canvas.toDataURL('image/jpeg', 0.75);
-          }
-          resolve(res);
-        } catch {
-          resolve(dataUrl);
-        }
-      };
-      img.onerror = () => resolve(dataUrl);
-      img.src = dataUrl;
-    } catch {
-      resolve(dataUrl);
-    }
-  });
-}
-
-/**
- * Background sync to dedicated cloud photo storage (Firestore /photos/{photoId})
+ * Background sync to cloud photo storage (Supabase photos table if configured)
  * Never blocks local UI or trip save operations.
  */
 function syncPhotoToCloudBackground(photoId: string, dataUrl: string) {
-  if (isQuotaExceeded()) return;
+  const supabase = getSupabase();
+  if (!supabase || !isSupabaseConfigured()) return;
 
   (async () => {
     try {
-      let uploadPayload = dataUrl;
-      // If photo is over 350KB, compress to a compact cloud document to guarantee it never exceeds 1MB limit
-      if (dataUrl.length > 350000) {
-        try {
-          const compressed = await compressForCloudDoc(dataUrl);
-          if (compressed && compressed.length < dataUrl.length) {
-            uploadPayload = compressed;
-          }
-        } catch {
-          // fallback to original payload
-        }
-      }
-
-      // Hard safeguard: never write a document over 900KB to Firestore
-      if (uploadPayload.length > 900000) {
-        console.warn(`[PhotoStore] Photo ${photoId} exceeds 900KB safety limit. Kept 100% in local IndexedDB.`);
-        return;
-      }
-
-      await setDoc(
-        doc(db, PHOTOS_COLLECTION, photoId),
+      // Optional best-effort sync to Supabase photos table if created
+      await supabase.from('photos').upsert(
         {
-          dataUrl: uploadPayload,
-          updatedAt: Date.now()
+          id: photoId,
+          data_url: dataUrl,
+          updated_at: Date.now(),
         },
-        { merge: true }
+        { onConflict: 'id' }
       );
-    } catch (err: any) {
-      if (isQuotaError(err)) {
-        setQuotaExceeded();
-      } else {
-        console.warn('[PhotoStore] Cloud photo sync notice:', err?.message || err);
-      }
+    } catch {
+      // Silent catch - local IDB preserves 100% of photos
     }
   })().catch(() => {});
 }
 
 /**
- * Save a photo dataUrl locally (IndexedDB + memory) and sync directly to dedicated Firestore `/photos/{photoId}`
- * Guarantees original high-definition file is 100% preserved in local IndexedDB.
+ * Save a photo dataUrl locally (IndexedDB + memory) and sync directly to cloud
+ * Guarantees original file is 100% preserved in local IndexedDB.
  */
 export async function savePhotoLocal(rawPhotoId: string, dataUrl: string): Promise<void> {
   if (!rawPhotoId || !dataUrl) return;
@@ -142,7 +73,7 @@ export async function savePhotoLocal(rawPhotoId: string, dataUrl: string): Promi
   memoryCache.set(cleanId, dataUrl);
   memoryCache.set(uri, dataUrl);
 
-  // 1. Immediately save full original HD photo to local IndexedDB (permanent browser storage)
+  // 1. Immediately save full photo to local IndexedDB (permanent browser storage)
   try {
     const idb = await getIDB();
     if (idb) {
@@ -159,7 +90,7 @@ export async function savePhotoLocal(rawPhotoId: string, dataUrl: string): Promi
     console.warn('[PhotoStore] IndexedDB save notice:', err);
   }
 
-  // 2. Non-blocking background sync to separate cloud photo storage
+  // 2. Non-blocking background sync
   syncPhotoToCloudBackground(cleanId, dataUrl);
 }
 
@@ -167,7 +98,7 @@ export async function savePhotoLocal(rawPhotoId: string, dataUrl: string): Promi
  * Retrieve a photo dataUrl:
  * 1. Memory Cache (instant)
  * 2. Local IndexedDB (fast)
- * 3. Firestore `photos` collection (cross-device cloud sync)
+ * 3. Supabase cloud sync
  * 4. Comprehensive recovery from `trips_backups`, `trips_cache`, and cursor scan in `JPlanner_Media_DB`
  */
 export async function getPhotoLocal(
@@ -253,20 +184,19 @@ export async function getPhotoLocal(
     }
   } catch {}
 
-  // 3. Check Firestore `photos` collection (cross-device cloud sync)
+  // 3. Check Supabase `photos` table if configured
   if (photoId) {
-    try {
-      const docSnap = await getDoc(doc(db, PHOTOS_COLLECTION, photoId));
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        if (data && typeof data.dataUrl === 'string') {
-          const cloudDataUrl = data.dataUrl;
-          savePhotoLocal(photoId, cloudDataUrl).catch(() => {});
-          return cloudDataUrl;
+    const supabase = getSupabase();
+    if (supabase && isSupabaseConfigured()) {
+      try {
+        const { data } = await supabase.from('photos').select('data_url').eq('id', photoId).maybeSingle();
+        if (data && typeof data.data_url === 'string') {
+          savePhotoLocal(photoId, data.data_url).catch(() => {});
+          return data.data_url;
         }
+      } catch (err) {
+        // Silent catch
       }
-    } catch (err) {
-      console.warn('Photo cloud fetch notice:', err);
     }
   }
 
@@ -366,7 +296,6 @@ export async function getPhotoLocal(
           if (val && (fallbackItemId || fallbackItemTitle) && val.includes(fallbackItemId || fallbackItemTitle || '')) {
             try {
               const parsed = JSON.parse(val);
-              // Quick recursive search for data:image/ in the parsed item
               const searchInObj = (obj: any): string | null => {
                 if (!obj || typeof obj !== 'object') return null;
                 if ((obj.id === fallbackItemId || obj.title === fallbackItemTitle) && (obj.images || obj.imageUrl)) {
@@ -420,9 +349,6 @@ export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; reco
 
   const processItem = async (item: any) => {
     if (!item) return;
-    const hasCurrentImages =
-      (item.images && item.images.length > 0 && item.images.some((img: string) => img && img.trim() !== '')) ||
-      Boolean(item.imageUrl && item.imageUrl.trim() !== '');
 
     // Case 1: Item has photo:// URIs -> resolve them
     if (item.images && Array.isArray(item.images)) {
@@ -490,14 +416,14 @@ export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; reco
 }
 
 /**
- * Save photo to both local store and Firestore
+ * Save photo to local store and cloud
  */
 export async function savePhotoToCloud(photoId: string, dataUrl: string): Promise<void> {
   await savePhotoLocal(photoId, dataUrl);
 }
 
 /**
- * Fetch photo from local or Firestore
+ * Fetch photo from local or cloud
  */
 export async function getPhotoFromCloud(photoId: string): Promise<string | null> {
   return getPhotoLocal(photoId);

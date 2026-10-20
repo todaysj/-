@@ -1,5 +1,6 @@
 import { Trip } from '../types';
 import { generatePhotoId, savePhotoLocal, getPhotoLocal } from './photoStore';
+export { compressAndUploadPhoto, SUPABASE_STORAGE_BUCKET } from '../lib/supabase';
 
 /**
  * Ultra-Crisp High-Definition Image Compression Utility.
