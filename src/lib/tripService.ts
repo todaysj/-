@@ -526,31 +526,56 @@ export async function saveTripToSupabase(trip: Trip, forceDirectWrite = false): 
       syncTripToServer(safePayload).catch(() => {});
 
       // 2. Supabase upsert
+      let supabaseSuccess = false;
+      let supabaseErrorMessage = '';
       const supabase = getSupabase();
       if (supabase && isSupabaseConfigured()) {
-        await supabase.from(TRIPS_TABLE).upsert(
-          {
-            id: safePayload.id,
-            title: safePayload.title || '',
-            destination: safePayload.destination || '',
-            start_date: safePayload.startDate || '',
-            end_date: safePayload.endDate || '',
-            data: safePayload,
-            is_deleted: false,
-            updated_at: safePayload.updatedAt || Date.now(),
-          },
-          { onConflict: 'id' }
-        );
+        try {
+          const { error: upsertErr } = await supabase.from(TRIPS_TABLE).upsert(
+            {
+              id: safePayload.id,
+              title: safePayload.title || '',
+              destination: safePayload.destination || '',
+              start_date: safePayload.startDate || '',
+              end_date: safePayload.endDate || '',
+              data: safePayload,
+              is_deleted: false,
+              updated_at: safePayload.updatedAt || Date.now(),
+            },
+            { onConflict: 'id' }
+          );
+
+          if (upsertErr) {
+            console.warn('[TripService] Supabase write notice:', upsertErr);
+            if (upsertErr.code === 'PGRST205') {
+              supabaseErrorMessage = 'Supabase에 trips 테이블이 없습니다 (설정 필요)';
+            } else {
+              supabaseErrorMessage = `Supabase 동기화 오류: ${upsertErr.message}`;
+            }
+          } else {
+            supabaseSuccess = true;
+          }
+        } catch (supabaseEx: any) {
+          console.warn('[TripService] Supabase exception:', supabaseEx);
+          supabaseErrorMessage = 'Supabase 연결 오류';
+        }
       }
 
       lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
       lastWrittenTripHash.set(cleanTrip.id, payloadHash);
       clearTimeout(watchdog);
-      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
+
+      if (supabaseErrorMessage) {
+        updateSyncStatus('error', supabaseErrorMessage);
+      } else if (supabaseSuccess) {
+        updateSyncStatus('synced', 'Supabase 실시간 동기화 완료');
+      } else {
+        updateSyncStatus('synced', '로컬 & 서버 저장 완료');
+      }
     } catch (err: any) {
       clearTimeout(watchdog);
-      console.warn('[TripService] Supabase write notice:', err);
-      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
+      console.warn('[TripService] Save write notice:', err);
+      updateSyncStatus('synced', '로컬 저장 완료');
     } finally {
       pendingTripWrites.delete(cleanTrip.id);
     }
@@ -856,27 +881,61 @@ export function subscribeToTrips(
           .from(TRIPS_TABLE)
           .select('*')
           .order('updated_at', { ascending: false });
+
         if (!isSubscribed) return;
-        if (!error && Array.isArray(data) && data.length > 0) {
-          const tripsList: Trip[] = [];
-          const deletedSet = getDeletedTripIds();
-          data.forEach((row: any) => {
-            if (row.is_deleted) {
-              markTripAsDeleted(row.id);
-              deleteTripFromIDB(row.id).catch(() => {});
-              return;
+
+        if (error) {
+          console.warn('[TripService] Supabase initial query error:', error);
+          if (error.code === 'PGRST205') {
+            updateSyncStatus('error', 'Supabase trips 테이블 생성 필요');
+          } else {
+            updateSyncStatus('error', `Supabase 연결 오류: ${error.message}`);
+          }
+          return;
+        }
+
+        if (Array.isArray(data)) {
+          if (data.length > 0) {
+            const tripsList: Trip[] = [];
+            const deletedSet = getDeletedTripIds();
+            data.forEach((row: any) => {
+              if (row.is_deleted) {
+                markTripAsDeleted(row.id);
+                deleteTripFromIDB(row.id).catch(() => {});
+                return;
+              }
+              if (!deletedSet.has(row.id) && !isTripDeleted(row.id)) {
+                const t: Trip = row.data && typeof row.data === 'object' ? row.data : row;
+                tripsList.push(t);
+              }
+            });
+            if (tripsList.length > 0) {
+              handleIncomingTrips(tripsList);
             }
-            if (!deletedSet.has(row.id) && !isTripDeleted(row.id)) {
-              const t: Trip = row.data && typeof row.data === 'object' ? row.data : row;
-              tripsList.push(t);
+          } else {
+            // Supabase table exists but is currently empty: push current local trips into Supabase
+            const local = getStoredTrips();
+            if (local && local.length > 0) {
+              console.log('[TripService] Auto-populating empty Supabase trips table with local trips...');
+              local.forEach(async (t) => {
+                try {
+                  await supabase.from(TRIPS_TABLE).upsert({
+                    id: t.id,
+                    title: t.title || '',
+                    destination: t.destination || '',
+                    start_date: t.startDate || '',
+                    end_date: t.endDate || '',
+                    data: t,
+                    is_deleted: false,
+                    updated_at: t.updatedAt || Date.now(),
+                  }, { onConflict: 'id' });
+                } catch {}
+              });
             }
-          });
-          if (tripsList.length > 0) {
-            handleIncomingTrips(tripsList);
           }
         }
       } catch (err) {
-        console.warn('[TripService] Supabase initial trips error:', err);
+        console.warn('[TripService] Supabase initial trips exception:', err);
       }
     })();
 
@@ -926,7 +985,9 @@ export function subscribeToTrips(
         )
         .subscribe((status: string) => {
           if (status === 'SUBSCRIBED') {
-            updateSyncStatus('synced', 'Supabase 실시간 동기화됨');
+            updateSyncStatus('synced', 'Supabase 실시간 동기화 활성화됨');
+          } else if (status === 'CHANNEL_ERROR') {
+            console.warn('[Supabase Realtime] Channel subscribe error, table may need setup');
           }
         });
     } catch (err: any) {
@@ -935,6 +996,54 @@ export function subscribeToTrips(
   };
 
   initSupabaseRealtime();
+
+  // C. Cross-device Fallback Polling (Every 4 seconds for instant mobile sync)
+  const pollTimer = setInterval(() => {
+    if (!isSubscribed) return;
+    if (typeof document !== 'undefined' && document.hidden) return;
+
+    // 1. Poll Server Hub
+    fetch('/api/sync/trips')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data && Array.isArray(data.trips) && data.trips.length > 0) {
+          handleIncomingTrips(data.trips);
+        }
+      })
+      .catch(() => {});
+
+    // 2. Poll Supabase directly
+    const sp = getSupabase();
+    if (sp && isSupabaseConfigured()) {
+      (async () => {
+        try {
+          const { data, error } = await sp
+            .from(TRIPS_TABLE)
+            .select('*')
+            .order('updated_at', { ascending: false });
+
+          if (!error && Array.isArray(data) && data.length > 0) {
+            const tripsList: Trip[] = [];
+            const deletedSet = getDeletedTripIds();
+            data.forEach((row: any) => {
+              if (row.is_deleted) {
+                markTripAsDeleted(row.id);
+                deleteTripFromIDB(row.id).catch(() => {});
+                return;
+              }
+              if (!deletedSet.has(row.id) && !isTripDeleted(row.id)) {
+                const t: Trip = row.data && typeof row.data === 'object' ? row.data : row;
+                tripsList.push(t);
+              }
+            });
+            if (tripsList.length > 0) {
+              handleIncomingTrips(tripsList);
+            }
+          }
+        } catch {}
+      })();
+    }
+  }, 4000);
 
   const handleConfigChanged = () => {
     if (supabaseChannel && getSupabase()) {
@@ -951,6 +1060,7 @@ export function subscribeToTrips(
 
   return () => {
     isSubscribed = false;
+    clearInterval(pollTimer);
     if (eventSource) {
       eventSource.close();
       eventSource = null;

@@ -212,10 +212,60 @@ export async function compressAndUploadPhoto(
 }
 
 /**
- * Recommended PostgreSQL schema for Supabase
+ * Extract Supabase Project Ref from URL (e.g. ithokuexnohwzhvobnlf from https://ithokuexnohwzhvobnlf.supabase.co)
  */
-export const SUPABASE_SQL_SCHEMA = `-- [J플래너 Supabase 초기 세팅 SQL]
--- Supabase 대시보드 -> SQL Editor에 복사하여 붙여넣고 Run을 눌러주세요.
+export function getSupabaseProjectRef(): string {
+  const { url } = getSupabaseCredentials();
+  try {
+    if (!url) return '';
+    const parsed = new URL(url);
+    const hostParts = parsed.hostname.split('.');
+    if (hostParts.length >= 3 && hostParts[1] === 'supabase') {
+      return hostParts[0];
+    }
+  } catch {}
+  return '';
+}
+
+/**
+ * Check if the required Supabase tables (trips, settings) exist
+ */
+export async function checkSupabaseTablesExist(): Promise<{ ok: boolean; missingTables: string[]; error?: string }> {
+  const supabase = getSupabase();
+  if (!supabase || !isSupabaseConfigured()) {
+    return { ok: false, missingTables: ['trips', 'settings'], error: 'Supabase 설정이 구성되지 않았습니다.' };
+  }
+
+  const missing: string[] = [];
+  try {
+    const { error: tripsErr } = await supabase.from('trips').select('id').limit(1);
+    if (tripsErr && tripsErr.code === 'PGRST205') {
+      missing.push('trips');
+    }
+
+    const { error: settingsErr } = await supabase.from('settings').select('id').limit(1);
+    if (settingsErr && settingsErr.code === 'PGRST205') {
+      missing.push('settings');
+    }
+
+    if (missing.length > 0) {
+      return { ok: false, missingTables: missing, error: '테이블 미생성' };
+    }
+
+    return { ok: true, missingTables: [] };
+  } catch (err: any) {
+    return { ok: false, missingTables: ['trips', 'settings'], error: err?.message || '연결 확인 오류' };
+  }
+}
+
+/**
+ * Complete, battle-tested PostgreSQL schema for Supabase
+ * Includes table creation, RLS permissions, Realtime publication, and Storage bucket policies.
+ */
+export const SUPABASE_SQL_SCHEMA = `-- ============================================================================
+-- [J플래너] Supabase 원클릭 전체 세팅 SQL
+-- Supabase 대시보드 -> SQL Editor -> New Query에 붙여넣고 [Run]을 클릭해 주세요!
+-- ============================================================================
 
 -- 1. 여행 일정(trips) 테이블 생성
 create table if not exists public.trips (
@@ -229,7 +279,12 @@ create table if not exists public.trips (
   updated_at bigint default (extract(epoch from now()) * 1000)::bigint
 );
 
--- Realtime 활성화 (일행 간 실시간 동기화)
+-- RLS 활성화 및 여행 일행 읽기/쓰기/삭제 전체 허용 정책
+alter table public.trips enable row level security;
+drop policy if exists "Allow public all access on trips" on public.trips;
+create policy "Allow public all access on trips" on public.trips for all using (true) with check (true);
+
+-- Realtime 실시간 동기화 활성화
 alter publication supabase_realtime add table public.trips;
 
 -- 2. 브랜드 및 공통 설정(settings) 테이블 생성
@@ -239,9 +294,18 @@ create table if not exists public.settings (
   updated_at bigint default (extract(epoch from now()) * 1000)::bigint
 );
 
--- Realtime 활성화
+alter table public.settings enable row level security;
+drop policy if exists "Allow public all access on settings" on public.settings;
+create policy "Allow public all access on settings" on public.settings for all using (true) with check (true);
+
 alter publication supabase_realtime add table public.settings;
 
--- 3. Storage 버킷 설정
--- Storage -> New bucket -> 버킷 이름을 'jplan-photos' 로 생성하고 Public bucket 옵션을 켜주세요.
+-- 3. 여행 사진 저장소 (jplan-photos 버킷) 자동 생성 및 공개 권한 부여
+insert into storage.buckets (id, name, public) 
+values ('jplan-photos', 'jplan-photos', true)
+on conflict (id) do update set public = true;
+
+drop policy if exists "Public Access to jplan-photos" on storage.objects;
+create policy "Public Access to jplan-photos" on storage.objects 
+for all using (bucket_id = 'jplan-photos') with check (bucket_id = 'jplan-photos');
 `;

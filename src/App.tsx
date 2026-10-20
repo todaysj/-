@@ -17,6 +17,7 @@ import { ExportModal } from './components/ExportModal';
 import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
+import { SupabaseSetupBanner } from './components/SupabaseSetupBanner';
 import { CheckCircle2, WifiOff, AlertTriangle, X, Upload } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
 import { getTotalTripDays, adjustSubsequentSchedules } from './utils/dateUtils';
@@ -1155,6 +1156,9 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 sm:pb-16 w-full overflow-x-hidden flex flex-col">
+      {/* Supabase 1-Click Setup Guidance Banner (shown when trips table is not yet created) */}
+      <SupabaseSetupBanner />
+
       {/* Top Navigation */}
       <Navbar
         trips={trips}
