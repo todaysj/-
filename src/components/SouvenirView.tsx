@@ -36,8 +36,9 @@ import {
   Save
 } from 'lucide-react';
 import { getTripSouvenirTabs, DEFAULT_SOUVENIR_TAGS, TAG_COLOR_PALETTE, DEFAULT_TAG_COLORS, getTagColorInfo } from '../utils/tabUtils';
-import { getPhotoLocal, getPhotoByItemOrFallback, recoverAllTripPhotos } from '../utils/photoStore';
+import { getPhotoLocal, getPhotoByItemOrFallback, recoverAllTripPhotos, uploadPhotoToCloudOrServer } from '../utils/photoStore';
 import {
+  saveTripBackup,
   getTripBackups,
   autoRecoverTabSouvenirs,
   restoreTabFromBackup,
@@ -51,7 +52,8 @@ const AsyncSouvenirImg: React.FC<{
   className?: string;
   itemId?: string;
   itemTitle?: string;
-}> = ({ src, alt, className, itemId, itemTitle }) => {
+  onRecovered?: (dataUrl: string) => void;
+}> = ({ src, alt, className, itemId, itemTitle, onRecovered }) => {
   const [resolvedSrc, setResolvedSrc] = useState<string>(() => {
     if (src && !src.startsWith('photo://')) return src;
     return '';
@@ -66,11 +68,15 @@ const AsyncSouvenirImg: React.FC<{
     if (!src) {
       if (itemId || itemTitle) {
         setIsResolving(true);
-        getPhotoByItemOrFallback('', itemId, itemTitle).then((found) => {
+        getPhotoByItemOrFallback('', itemId, itemTitle).then(async (found) => {
           if (isMounted) {
             if (found) {
-              setResolvedSrc(found);
+              const permUrl = found.startsWith('data:image/')
+                ? await uploadPhotoToCloudOrServer(itemId || 'item', found)
+                : found;
+              setResolvedSrc(permUrl);
               setHasFailed(false);
+              onRecovered?.(permUrl);
             } else {
               setHasFailed(true);
             }
@@ -92,11 +98,15 @@ const AsyncSouvenirImg: React.FC<{
 
     if (src.startsWith('photo://')) {
       setIsResolving(true);
-      getPhotoLocal(src, itemId, itemTitle).then((dataUrl) => {
+      getPhotoLocal(src, itemId, itemTitle).then(async (dataUrl) => {
         if (isMounted) {
           if (dataUrl) {
-            setResolvedSrc(dataUrl);
+            const permUrl = dataUrl.startsWith('data:image/')
+              ? await uploadPhotoToCloudOrServer(src, dataUrl)
+              : dataUrl;
+            setResolvedSrc(permUrl);
             setHasFailed(false);
+            onRecovered?.(permUrl);
           } else {
             setHasFailed(true);
           }
@@ -120,6 +130,7 @@ const AsyncSouvenirImg: React.FC<{
   }, [src, itemId, itemTitle]);
 
   if (isResolving) {
+    if (!src) return null;
     return (
       <div className={`flex items-center justify-center bg-slate-100 ${className || ''}`}>
         <div className="w-5 h-5 border-2 border-slate-300 border-t-pink-500 rounded-full animate-spin" />
@@ -128,6 +139,7 @@ const AsyncSouvenirImg: React.FC<{
   }
 
   if (hasFailed || !resolvedSrc) {
+    if (!src) return null;
     return (
       <div className={`flex flex-col items-center justify-center bg-slate-50 text-slate-300 p-2 ${className || ''}`}>
         <ImageIcon className="w-6 h-6 stroke-[1.5] text-slate-300 mb-1" />
@@ -241,19 +253,38 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [isCompressingImage, setIsCompressingImage] = useState(false);
 
-  // Load and cache full HD photos into local photoStore without re-triggering cloud writes
+  // Automatically recover photos into trip state if any items in the trip are missing images or have photo:// references
   useEffect(() => {
     let isMounted = true;
 
-    // Prefetch photo:// references in background so AsyncImage renders instantly
-    resolveTripPhotos(trip).catch((err) => {
-      console.warn('Background photo prefetch notice:', err);
-    });
+    const needsPhotoRecovery = (trip.souvenirTabs || []).some((tab) =>
+      (tab.items || []).some(
+        (item) =>
+          !item.imageUrl ||
+          item.imageUrl.startsWith('photo://') ||
+          !item.images ||
+          item.images.length === 0 ||
+          item.images.some((img) => !img || img.startsWith('photo://'))
+      )
+    );
+
+    if (needsPhotoRecovery) {
+      recoverAllTripPhotos(trip).then(({ trip: recoveredTrip, recoveredCount }) => {
+        if (!isMounted) return;
+        if (recoveredCount > 0) {
+          onUpdateTrip(recoveredTrip);
+          setRecoveryBanner(`기념품 사진 ${recoveredCount}장이 브라우저 저장소 및 백업에서 복구되었습니다.`);
+          setTimeout(() => setRecoveryBanner(null), 5000);
+        }
+      }).catch((err) => {
+        console.warn('Auto photo recover notice:', err);
+      });
+    }
 
     return () => {
       isMounted = false;
     };
-  }, [trip.id]);
+  }, [trip.id, currentTab.id]);
 
   // Open Backup & History Modal
   const handleOpenBackupModal = async () => {
@@ -272,13 +303,11 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
   // Restore specific backup snapshot for current tab
   const handleRestoreBackup = (backup: TripBackup) => {
     if (!backup.trip) return;
-    if (confirm(`'${backup.dateStr}' 시점으로 복원하시겠습니까?`)) {
-      const updatedTrip = restoreTabFromBackup(trip, currentTab.id, backup.trip, currentTab.title);
-      onUpdateTrip(updatedTrip);
-      setIsBackupModalOpen(false);
-      setRecoveryBanner(`복원되었습니다.`);
-      setTimeout(() => setRecoveryBanner(null), 5000);
-    }
+    const updatedTrip = restoreTabFromBackup(trip, currentTab.id, backup.trip, currentTab.title);
+    onUpdateTrip(updatedTrip);
+    setIsBackupModalOpen(false);
+    setRecoveryBanner(`'${backup.dateStr}' 시점으로 복원되었습니다.`);
+    setTimeout(() => setRecoveryBanner(null), 5000);
   };
 
   // Run auto-recovery for current tab
@@ -290,7 +319,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
         onUpdateTrip(recoveredTrip);
         setRecoveryBanner(`누락된 ${recoveredCount}개 항목이 복구되었습니다.`);
       } else {
-        alert('모든 항목이 최신 상태입니다.');
+        setRecoveryBanner('모든 항목이 최신 상태입니다.');
       }
       setIsBackupModalOpen(false);
       setTimeout(() => setRecoveryBanner(null), 5000);
@@ -308,7 +337,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
         onUpdateTrip(recoveredTrip);
         setRecoveryBanner(`기념품 사진 ${recoveredCount}장이 캐시/백업에서 성공적으로 복구되었습니다.`);
       } else {
-        alert('모든 사진이 이미 정상 표시되고 있거나 최신 상태입니다.');
+        setRecoveryBanner('모든 사진이 이미 정상 표시되고 있거나 최신 상태입니다.');
       }
       setIsBackupModalOpen(false);
       setTimeout(() => setRecoveryBanner(null), 5000);
@@ -645,10 +674,26 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
         isPurchased,
         createdAt: new Date().toISOString()
       };
-      updateCurrentSouvenirTab((tab) => ({
-        ...tab,
-        items: [newItem, ...tab.items]
-      }));
+
+      const tabs = getTripSouvenirTabs(trip);
+      const updatedTabs = tabs.map((t) =>
+        t.id === currentTab.id ? { ...t, items: [newItem, ...t.items] } : t
+      );
+      const currentUpdated = updatedTabs.find((t) => t.id === currentTab.id) || updatedTabs[0];
+      const updatedTrip: Trip = {
+        ...trip,
+        souvenirTabs: updatedTabs,
+        souvenirTags: currentUpdated ? currentUpdated.tags : DEFAULT_SOUVENIR_TAGS,
+        souvenirTagColors: currentUpdated ? currentUpdated.tagColors : DEFAULT_TAG_COLORS,
+        updatedAt: Date.now()
+      };
+
+      // Backup snapshot in IndexedDB is created ONLY when a souvenir item is added
+      saveTripBackup(updatedTrip).catch((err) => {
+        console.warn('기념품 추가 백업 저장 실패:', err);
+      });
+
+      onUpdateTrip(updatedTrip);
     }
 
     setShowExitConfirm(false);
@@ -944,6 +989,7 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
               <History className="w-4 h-4 text-emerald-600" />
               <span>백업 & 복구</span>
             </button>
+
 
             <button
               type="button"
@@ -1242,18 +1288,35 @@ export const SouvenirView: React.FC<SouvenirViewProps> = ({
                       )}
                     </div>
                   ) : (
-                    <div className="p-4 pb-0 flex items-center justify-between">
-                      <span
-                        className={`px-2.5 py-1 rounded-lg text-xs font-extrabold border shadow-2xs ${tagStyle}`}
-                      >
-                        {item.tag}
-                      </span>
-                      {item.isPurchased && (
-                        <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-md text-[11px] font-black flex items-center space-x-1">
-                          <Check className="w-3 h-3 text-emerald-600" />
-                          <span>구입완료</span>
+                    <div className="relative w-full">
+                      <AsyncSouvenirImg
+                        src=""
+                        itemId={item.id}
+                        itemTitle={item.title}
+                        onRecovered={(recoveredUrl) => {
+                          updateCurrentSouvenirTab((tab) => ({
+                            ...tab,
+                            items: tab.items.map((i) =>
+                              i.id === item.id ? { ...i, imageUrl: recoveredUrl, images: [recoveredUrl] } : i
+                            )
+                          }));
+                        }}
+                        className="w-full h-44 object-cover"
+                        alt={item.title}
+                      />
+                      <div className="p-4 pb-0 flex items-center justify-between">
+                        <span
+                          className={`px-2.5 py-1 rounded-lg text-xs font-extrabold border shadow-2xs ${tagStyle}`}
+                        >
+                          {item.tag}
                         </span>
-                      )}
+                        {item.isPurchased && (
+                          <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-200 rounded-md text-[11px] font-black flex items-center space-x-1">
+                            <Check className="w-3 h-3 text-emerald-600" />
+                            <span>구입완료</span>
+                          </span>
+                        )}
+                      </div>
                     </div>
                   )}
 

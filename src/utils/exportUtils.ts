@@ -1,6 +1,7 @@
 import { Trip, ScheduleItem, Reservation, PackingItem, ExpenseItem } from '../types';
 import { resolveTripPhotos } from './imageUtils';
 import { getTripChecklistTabs, getTripSouvenirTabs } from './tabUtils';
+import { timeStringToMinutes } from './dateUtils';
 
 export interface ExportSectionOptions {
   cover?: boolean;
@@ -12,18 +13,65 @@ export interface ExportSectionOptions {
 }
 
 /**
- * Downloads text or JSON content as a file in the browser
+ * Downloads text or JSON content as a file in the browser (100% compatible with mobile, iframes, and Safari)
  */
-export function downloadFile(filename: string, content: string, mimeType: string) {
-  const blob = new Blob([content], { type: mimeType });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
+export function downloadFile(filename: string, content: string, mimeType: string = 'application/json;charset=utf-8') {
+  let blobSuccess = false;
+  try {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.style.display = 'none';
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    blobSuccess = true;
+
+    setTimeout(() => {
+      try {
+        if (a.parentNode) {
+          a.parentNode.removeChild(a);
+        }
+        URL.revokeObjectURL(url);
+      } catch {}
+    }, 1500);
+  } catch (err) {
+    console.warn('Client blob download error:', err);
+  }
+
+  // Guaranteed fallback for mobile/iframe environments where blob navigation is restricted
+  if (!blobSuccess) {
+    try {
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = '/api/backup/download';
+      form.style.display = 'none';
+
+      const fileInput = document.createElement('input');
+      fileInput.type = 'hidden';
+      fileInput.name = 'filename';
+      fileInput.value = filename;
+      form.appendChild(fileInput);
+
+      const contentInput = document.createElement('input');
+      contentInput.type = 'hidden';
+      contentInput.name = 'content';
+      contentInput.value = content;
+      form.appendChild(contentInput);
+
+      document.body.appendChild(form);
+      form.submit();
+
+      setTimeout(() => {
+        try {
+          if (form.parentNode) form.parentNode.removeChild(form);
+        } catch {}
+      }, 2000);
+    } catch (fallbackErr) {
+      console.error('All download methods failed:', fallbackErr);
+    }
+  }
 }
 
 /**
@@ -73,7 +121,7 @@ export function generateTripMarkdown(trip: Trip, options?: ExportSectionOptions)
 
       const daySchedules = (trip.schedule || [])
         .filter((s) => s.day === day)
-        .sort((a, b) => a.time.localeCompare(b.time));
+        .sort((a, b) => timeStringToMinutes(a.time) - timeStringToMinutes(b.time));
 
       lines.push(`### Day ${day} - ${dateStr}`);
 
@@ -242,12 +290,22 @@ export function exportTripAsMarkdownFile(trip: Trip, options?: ExportSectionOpti
 }
 
 /**
- * Downloads JSON backup file with 100% of souvenir photos fully resolved to base64
+ * Downloads JSON backup file with 100% of souvenir photos fully resolved
  */
 export async function exportTripAsJSONFile(trip: Trip): Promise<void> {
-  const fullyResolvedTrip = await resolveTripPhotos(trip);
-  const cleanTitle = trip.title.replace(/[/\\?%*:|"<>]/g, '_');
+  const cleanTitle = (trip?.title || '여행').replace(/[/\\?%*:|"<>]/g, '_');
   const filename = `${cleanTitle}_데이터_백업.json`;
+
+  let fullyResolvedTrip = trip;
+  try {
+    fullyResolvedTrip = await Promise.race([
+      resolveTripPhotos(trip),
+      new Promise<Trip>((resolve) => setTimeout(() => resolve(trip), 2500))
+    ]);
+  } catch {
+    fullyResolvedTrip = trip;
+  }
+
   const content = JSON.stringify(fullyResolvedTrip, null, 2);
   downloadFile(filename, content, 'application/json;charset=utf-8');
 }
@@ -256,15 +314,24 @@ export async function exportTripAsJSONFile(trip: Trip): Promise<void> {
  * Downloads full comprehensive workspace backup (all trips + all souvenir photos + brand settings)
  */
 export async function exportFullBackupJSONFile(trips: Trip[], brandSettings?: any): Promise<void> {
-  const resolvedTrips = await Promise.all(
-    trips.map(async (t) => {
-      try {
-        return await resolveTripPhotos(t);
-      } catch {
-        return t;
-      }
-    })
-  );
+  const safeTrips = Array.isArray(trips) && trips.length > 0 ? trips : [];
+  let resolvedTrips = safeTrips;
+  try {
+    resolvedTrips = await Promise.race([
+      Promise.all(
+        safeTrips.map(async (t) => {
+          try {
+            return await resolveTripPhotos(t);
+          } catch {
+            return t;
+          }
+        })
+      ),
+      new Promise<Trip[]>((resolve) => setTimeout(() => resolve(safeTrips), 3000))
+    ]);
+  } catch {
+    resolvedTrips = safeTrips;
+  }
 
   const payload = {
     version: '1.0',

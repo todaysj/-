@@ -8,7 +8,8 @@ import {
   formatDayDateShort,
   formatDayDateKorean,
   formatDayDateFull,
-  formatTripNightsAndDays
+  formatTripNightsAndDays,
+  timeStringToMinutes
 } from '../utils/dateUtils';
 
 interface MapViewProps {
@@ -46,12 +47,18 @@ export const MapView: React.FC<MapViewProps> = ({ trip }) => {
   // Items that have lat & lng for Leaflet rendering (sorted chronologically)
   const itemsWithCoords = scheduleList
     .filter((item) => (selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay) && item.lat && item.lng)
-    .sort((a, b) => (a.day !== b.day ? a.day - b.day : a.time.localeCompare(b.time)));
+    .sort((a, b) => {
+      if (a.day !== b.day) return a.day - b.day;
+      return timeStringToMinutes(a.time) - timeStringToMinutes(b.time);
+    });
 
   // All items with a location name for list display
   const itemsWithLocation = scheduleList
     .filter((item) => (selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay) && item.location && item.location.trim().length > 0)
-    .sort((a, b) => (a.day !== b.day ? a.day - b.day : a.time.localeCompare(b.time)));
+    .sort((a, b) => {
+      if (a.day !== b.day) return a.day - b.day;
+      return timeStringToMinutes(a.time) - timeStringToMinutes(b.time);
+    });
 
   useEffect(() => {
     if (!mapContainerRef.current) return;

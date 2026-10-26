@@ -96,7 +96,14 @@ interface BrandEditModalProps {
   currentPassword?: string;
   trips?: Trip[];
   onClose: () => void;
-  onSave: (title: string, subtitle: string, badge: string, tabOrder: TabType[], newActiveTripId?: string) => void;
+  onSave: (
+    title: string,
+    subtitle: string,
+    badge: string,
+    tabOrder: TabType[],
+    newTripOrder?: string[],
+    newActiveTripId?: string
+  ) => void;
   onReset: () => void;
   onSavePassword?: (newPassword: string) => void;
   onSaveTripOrder?: (newOrderedTrips: Trip[]) => void;
@@ -177,9 +184,9 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
     setOrderedTrips(newItems);
   };
 
-  const handleSaveTrips = () => {
+  const handleSaveTrips = async () => {
     if (onSaveTripOrder) {
-      onSaveTripOrder(orderedTrips);
+      await onSaveTripOrder(orderedTrips);
       setTripOrderSaved(true);
       setTimeout(() => setTripOrderSaved(false), 3000);
     }
@@ -200,18 +207,15 @@ export const BrandEditModal: React.FC<BrandEditModalProps> = ({
     setTabOrder([...DEFAULT_TAB_ORDER]);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title.trim()) return;
-    let newTopTripId: string | undefined = undefined;
-    if (onSaveTripOrder) {
-      const orderChanged = JSON.stringify(orderedTrips.map((t) => t.id)) !== JSON.stringify(trips.map((t) => t.id));
-      if (orderChanged) {
-        onSaveTripOrder(orderedTrips);
-        newTopTripId = orderedTrips[0]?.id;
-      }
+    const newOrderIds = orderedTrips.map((t) => t.id);
+    const orderChanged = JSON.stringify(newOrderIds) !== JSON.stringify(trips.map((t) => t.id));
+    if (orderChanged && onSaveTripOrder) {
+      await onSaveTripOrder(orderedTrips);
     }
-    onSave(title.trim(), subtitle.trim(), '', tabOrder, newTopTripId);
+    onSave(title.trim(), subtitle.trim(), '', tabOrder, newOrderIds, newOrderIds[0]);
     onClose();
   };
 

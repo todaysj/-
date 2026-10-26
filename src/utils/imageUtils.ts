@@ -139,7 +139,7 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     delete (cloned as any).packingList;
   }
 
-  // 2. Process souvenir items: detach base64 photos to photo:// links & save to separate photo storage
+  // 2. Process souvenir items: cache to photo store and resolve any photo:// links back to full image
   if (cloned.souvenirTabs && Array.isArray(cloned.souvenirTabs)) {
     for (const tab of cloned.souvenirTabs) {
       if (tab.items && Array.isArray(tab.items)) {
@@ -151,9 +151,12 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
               if (typeof img === 'string') {
                 if (img.startsWith('data:image/')) {
                   const photoId = generatePhotoId(`${trip.id}_${item.id}_${idx}`);
-                  await savePhotoLocal(photoId, img);
-                  processedImages.push(`photo://${photoId}`);
-                } else if (img.startsWith('photo://') || img.startsWith('http://') || img.startsWith('https://')) {
+                  savePhotoLocal(photoId, img).catch(() => {});
+                  processedImages.push(img);
+                } else if (img.startsWith('photo://')) {
+                  const resolved = await getPhotoLocal(img, item.id, item.title);
+                  processedImages.push(resolved || img);
+                } else if (img.trim() !== '') {
                   processedImages.push(img);
                 }
               }
@@ -169,10 +172,14 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
             if (typeof img === 'string') {
               if (img.startsWith('data:image/')) {
                 const photoId = generatePhotoId(`${trip.id}_${item.id}_0`);
-                await savePhotoLocal(photoId, img);
-                item.imageUrl = `photo://${photoId}`;
-                item.images = [`photo://${photoId}`];
-              } else if (img.startsWith('photo://') || img.startsWith('http://') || img.startsWith('https://')) {
+                savePhotoLocal(photoId, img).catch(() => {});
+                item.imageUrl = img;
+                item.images = [img];
+              } else if (img.startsWith('photo://')) {
+                const resolved = await getPhotoLocal(img, item.id, item.title);
+                item.imageUrl = resolved || img;
+                item.images = [item.imageUrl];
+              } else if (img.trim() !== '') {
                 item.imageUrl = img;
                 item.images = [img];
               } else {
@@ -186,59 +193,16 @@ export async function detachTripPhotos(trip: Trip): Promise<Trip> {
     }
   }
 
-  // Legacy souvenirs array if present
-  if ((cloned as any).souvenirs && Array.isArray((cloned as any).souvenirs)) {
-    for (const item of (cloned as any).souvenirs) {
-      if (item?.images && Array.isArray(item.images)) {
-        const processedImages: string[] = [];
-        for (let idx = 0; idx < item.images.length; idx++) {
-          const img = item.images[idx];
-          if (typeof img === 'string' && img.startsWith('data:image/')) {
-            const photoId = generatePhotoId(`${trip.id}_leg_${item.id}_${idx}`);
-            await savePhotoLocal(photoId, img);
-            processedImages.push(`photo://${photoId}`);
-          } else if (typeof img === 'string') {
-            processedImages.push(img);
-          }
-        }
-        item.images = processedImages;
-        if (processedImages.length > 0) item.imageUrl = processedImages[0];
-      } else if (item?.imageUrl && typeof item.imageUrl === 'string' && item.imageUrl.startsWith('data:image/')) {
-        const photoId = generatePhotoId(`${trip.id}_leg_${item.id}_0`);
-        await savePhotoLocal(photoId, item.imageUrl);
-        item.imageUrl = `photo://${photoId}`;
-        item.images = [`photo://${photoId}`];
-      }
-    }
-  }
-
   // 3. Process cover image
   if (cloned.coverImage && typeof cloned.coverImage === 'string') {
-    if (cloned.coverImage.startsWith('data:image/')) {
-      const photoId = generatePhotoId(`${trip.id}_cover`);
-      await savePhotoLocal(photoId, cloned.coverImage);
-      cloned.coverImage = `photo://${photoId}`;
+    if (cloned.coverImage.startsWith('photo://')) {
+      const resolved = await getPhotoLocal(cloned.coverImage);
+      if (resolved) cloned.coverImage = resolved;
     }
   }
 
-  // 4. Process reservations (qrCodeUrl, fileUrl)
-  if (cloned.reservations && Array.isArray(cloned.reservations)) {
-    for (const res of cloned.reservations) {
-      if (res.qrCodeUrl && typeof res.qrCodeUrl === 'string' && res.qrCodeUrl.startsWith('data:image/')) {
-        const photoId = generatePhotoId(`${trip.id}_res_qr_${res.id}`);
-        await savePhotoLocal(photoId, res.qrCodeUrl);
-        res.qrCodeUrl = `photo://${photoId}`;
-      }
-      if (res.fileUrl && typeof res.fileUrl === 'string' && res.fileUrl.startsWith('data:image/')) {
-        const photoId = generatePhotoId(`${trip.id}_res_file_${res.id}`);
-        await savePhotoLocal(photoId, res.fileUrl);
-        res.fileUrl = `photo://${photoId}`;
-      }
-    }
-  }
-
-  // 5. Deep scan catch-all: guarantees 0 base64 images ever remain in the trip document
-  return deepDetachBase64(cloned, trip.id);
+  // 4. Return complete trip with 100% of photos intact
+  return cloned;
 }
 
 /**

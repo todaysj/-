@@ -1,4 +1,4 @@
-const CACHE_NAME = 'j-planner-offline-v3';
+const CACHE_NAME = 'j-planner-offline-v5';
 
 // Initial core assets to pre-cache
 const STATIC_ASSETS = [

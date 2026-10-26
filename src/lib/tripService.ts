@@ -3,14 +3,14 @@ import { INITIAL_TRIPS } from '../data/mockData';
 import { detachTripPhotos, resolveTripPhotos } from '../utils/imageUtils';
 import { getTripSouvenirTabs, getTripChecklistTabs, unionSouvenirItems, DEFAULT_PACKING_CATEGORIES, DEFAULT_SOUVENIR_TAGS } from '../utils/tabUtils';
 import { cleanTripTitle } from '../utils/dateUtils';
-import { saveTripBackup, saveTripsToIDB, getTripsFromIDB, deleteTripFromIDB } from '../utils/tripIndexedDB';
+import { saveTripsToIDB, getTripsFromIDB, deleteTripFromIDB } from '../utils/tripIndexedDB';
 import { savePhotoLocal, generatePhotoId } from '../utils/photoStore';
 import { getSupabase, isSupabaseConfigured } from './supabase';
 
 const TRIPS_TABLE = 'trips';
 const SETTINGS_TABLE = 'settings';
 const STORAGE_TRIPS_KEY = 'jplanner_trips_cache';
-const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
+export const STORAGE_BRAND_KEY = 'jplanner_brand_settings_cache';
 const STORAGE_DELETED_TRIPS_KEY = 'jplanner_deleted_trip_ids';
 
 const deletedTripIdsMemorySet = new Set<string>(['test_sync']);
@@ -143,6 +143,93 @@ function sanitizeForCloud(trip: Trip): Trip {
 const lastWrittenTripHash = new Map<string, string>();
 const lastWrittenContentFingerprint = new Map<string, string>();
 const pendingTripWrites = new Map<string, any>();
+
+// Local save protection window: prevents incoming SSE/polling snapshots from reverting newly saved changes
+export const recentlySavedTrips = new Map<string, number>();
+
+export function markTripAsRecentlySaved(tripId: string, durationMs: number = 6000): void {
+  recentlySavedTrips.set(tripId, Date.now() + durationMs);
+}
+
+export function haveTripsChanged(current: Trip[], incoming: Trip[]): boolean {
+  if (!current || !incoming) return true;
+  if (current.length !== incoming.length) return true;
+  for (let i = 0; i < current.length; i++) {
+    const c = current[i];
+    const n = incoming[i];
+    if (!c || !n) return true;
+    if (c.id !== n.id) return true;
+    if ((c.updatedAt || 0) !== (n.updatedAt || 0)) return true;
+    if (c.title !== n.title) return true;
+    if ((c.schedule?.length || 0) !== (n.schedule?.length || 0)) return true;
+    if ((c.reservations?.length || 0) !== (n.reservations?.length || 0)) return true;
+    if ((c.expenses?.length || 0) !== (n.expenses?.length || 0)) return true;
+    if ((c.souvenirTabs?.length || 0) !== (n.souvenirTabs?.length || 0)) return true;
+
+    // Check individual schedule item time, endTime, title, isDone
+    const cSched = c.schedule || [];
+    const nSched = n.schedule || [];
+    for (let j = 0; j < cSched.length; j++) {
+      if (
+        cSched[j].id !== nSched[j].id ||
+        cSched[j].time !== nSched[j].time ||
+        cSched[j].endTime !== nSched[j].endTime ||
+        cSched[j].title !== nSched[j].title ||
+        cSched[j].day !== nSched[j].day ||
+        cSched[j].isDone !== nSched[j].isDone
+      ) {
+        return true;
+      }
+    }
+
+    // Check souvenir items and image resolution
+    const cTabs = c.souvenirTabs || [];
+    const nTabs = n.souvenirTabs || [];
+    for (let t = 0; t < cTabs.length; t++) {
+      const cItems = cTabs[t].items || [];
+      const nItems = nTabs[t].items || [];
+      if (cItems.length !== nItems.length) return true;
+      for (let k = 0; k < cItems.length; k++) {
+        if (
+          cItems[k].id !== nItems[k].id ||
+          cItems[k].imageUrl !== nItems[k].imageUrl ||
+          (cItems[k].images?.length || 0) !== (nItems[k].images?.length || 0) ||
+          cItems[k].title !== nItems[k].title
+        ) {
+          return true;
+        }
+      }
+    }
+
+    // Check checklist tabs, categories, and item category changes
+    const cChecklists = c.checklistTabs || [];
+    const nChecklists = n.checklistTabs || [];
+    if (cChecklists.length !== nChecklists.length) return true;
+    for (let t = 0; t < cChecklists.length; t++) {
+      const cItems = cChecklists[t].items || [];
+      const nItems = nChecklists[t].items || [];
+      const cCats = cChecklists[t].categories || [];
+      const nCats = nChecklists[t].categories || [];
+      if (cItems.length !== nItems.length) return true;
+      if (cCats.length !== nCats.length) return true;
+      for (let k = 0; k < cCats.length; k++) {
+        if (cCats[k] !== nCats[k]) return true;
+      }
+      for (let k = 0; k < cItems.length; k++) {
+        if (
+          cItems[k].id !== nItems[k].id ||
+          cItems[k].title !== nItems[k].title ||
+          cItems[k].category !== nItems[k].category ||
+          cItems[k].isPacked !== nItems[k].isPacked ||
+          cItems[k].isEssential !== nItems[k].isEssential
+        ) {
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
 
 let lastWrittenBrandHash = '';
 let pendingBrandTimer: any = null;
@@ -291,52 +378,24 @@ function reconcileSingleTrip(newer: Trip, older: Trip): Trip {
   const safeNewer = sanitizeForCloud(newer);
   const safeOlder = sanitizeForCloud(older);
 
-  const mergedScheduleMap = new Map<string, ScheduleItem>();
-  (safeOlder.schedule || []).forEach((item) => {
-    if (item && item.id) mergedScheduleMap.set(item.id, item);
-  });
-  (safeNewer.schedule || []).forEach((item) => {
-    if (item && item.id) mergedScheduleMap.set(item.id, item);
-  });
-
-  const mergedReservationsMap = new Map<string, Reservation>();
-  (safeOlder.reservations || []).forEach((res) => {
-    if (res && res.id) mergedReservationsMap.set(res.id, res);
-  });
-  (safeNewer.reservations || []).forEach((res) => {
-    if (res && res.id) mergedReservationsMap.set(res.id, res);
-  });
-
-  const mergedExpensesMap = new Map<string, ExpenseItem>();
-  (safeOlder.expenses || []).forEach((exp) => {
-    if (exp && exp.id) mergedExpensesMap.set(exp.id, exp);
-  });
-  (safeNewer.expenses || []).forEach((exp) => {
-    if (exp && exp.id) mergedExpensesMap.set(exp.id, exp);
-  });
-
-  const checklistTabs = safeNewer.checklistTabs && safeNewer.checklistTabs.length > 0
-    ? safeNewer.checklistTabs
-    : safeOlder.checklistTabs || [];
-
-  const souvenirTabs = safeNewer.souvenirTabs && safeNewer.souvenirTabs.length > 0
-    ? safeNewer.souvenirTabs
-    : safeOlder.souvenirTabs || [];
-
-  const allMembers = Array.from(
-    new Set([...(safeNewer.members || ['나']), ...(safeOlder.members || ['나'])])
-  );
-
+  // The newer trip's schedule, reservations, and expenses are authoritative.
+  // Never union old items that were explicitly deleted in the newer version!
   return {
     ...safeOlder,
     ...safeNewer,
     title: cleanTripTitle(safeNewer.title || safeOlder.title),
-    schedule: Array.from(mergedScheduleMap.values()),
-    reservations: Array.from(mergedReservationsMap.values()),
-    expenses: Array.from(mergedExpensesMap.values()),
-    checklistTabs,
-    souvenirTabs,
-    members: allMembers,
+    schedule: safeNewer.schedule || [],
+    reservations: safeNewer.reservations || [],
+    expenses: safeNewer.expenses || [],
+    checklistTabs: safeNewer.checklistTabs && safeNewer.checklistTabs.length > 0
+      ? safeNewer.checklistTabs
+      : safeOlder.checklistTabs || [],
+    souvenirTabs: safeNewer.souvenirTabs && safeNewer.souvenirTabs.length > 0
+      ? safeNewer.souvenirTabs
+      : safeOlder.souvenirTabs || [],
+    members: Array.from(
+      new Set([...(safeNewer.members || ['나']), ...(safeOlder.members || ['나'])])
+    ),
     updatedAt: Math.max(safeNewer.updatedAt || 0, safeOlder.updatedAt || 0, Date.now())
   };
 }
@@ -411,17 +470,12 @@ export async function saveTripToSupabase(trip: Trip, forceDirectWrite = false): 
 
   const timestampedTrip: Trip = {
     ...trip,
-    updatedAt: Date.now()
+    updatedAt: trip.updatedAt || Date.now()
   };
 
   pendingTripWrites.set(timestampedTrip.id, null);
 
-  // 1. Immediately create a safety backup in IndexedDB
-  saveTripBackup(timestampedTrip).catch((err) => {
-    console.error('상세 에러 (saveTripBackup):', err);
-  });
-
-  // 2. Synchronously update browser cache & IndexedDB with full data for instant local response (0ms)
+  // 1. Synchronously update browser cache & IndexedDB with full data for instant local response (0ms)
   try {
     const currentTrips = getStoredTrips();
     const exists = currentTrips.some((t) => t.id === timestampedTrip.id);
@@ -436,14 +490,17 @@ export async function saveTripToSupabase(trip: Trip, forceDirectWrite = false): 
     console.error('상세 에러 (saveTrip local cache):', err);
   }
 
-  // 3. Prepare clean payload
-  let cleanTrip: Trip;
+  // 3. Prepare clean payload with photos preserved
+  let cleanTrip: Trip = timestampedTrip;
   try {
     cleanTrip = await detachTripPhotos(timestampedTrip);
   } catch (e) {
     cleanTrip = timestampedTrip;
   }
   const safePayload = sanitizeForCloud(cleanTrip);
+
+  // Protect this trip from incoming polling/SSE overwriting for 30 seconds
+  markTripAsRecentlySaved(cleanTrip.id, 30000);
 
   // Direct immediate write if requested
   if (forceDirectWrite) {
@@ -481,7 +538,7 @@ export async function saveTripToSupabase(trip: Trip, forceDirectWrite = false): 
         );
       }
 
-      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 2000));
+      const timeoutPromise = new Promise((resolve) => setTimeout(resolve, 2500));
       await Promise.allSettled([serverSyncPromise, Promise.race([supabasePromise, timeoutPromise])]);
 
       lastWrittenContentFingerprint.set(cleanTrip.id, contentFingerprint);
@@ -668,13 +725,24 @@ export function subscribeToTrips(
     const initial = filteredIdb && filteredIdb.length > 0 ? filteredIdb : getStoredTrips();
     if (initial && initial.length > 0) {
       onUpdate(initial);
+      resolveTripPhotosList(initial).then((resolved) => {
+        if (!isSubscribed) return;
+        const cleanResolved = resolved.filter((t) => t && t.id && !deletedSet.has(t.id) && !(t as any).isDeleted);
+        if (haveTripsChanged(initial, cleanResolved)) {
+          saveTripsToIDB(cleanResolved).catch(() => {});
+          onUpdate(cleanResolved);
+          cleanResolved.forEach((rTrip) => {
+            saveTripToSupabase(rTrip, true).catch(() => {});
+          });
+        }
+      }).catch(() => {});
     }
   }).catch((err) => {
     console.error('상세 에러 (getTripsFromIDB initial):', err);
   });
 
   // Reconciler for incoming remote trips
-  const handleIncomingTrips = async (remoteTrips: Trip[]) => {
+  const handleIncomingTrips = async (remoteTrips: Trip[], explicitBrand?: any) => {
     if (!remoteTrips || remoteTrips.length === 0) return;
 
     const deletedSet = getDeletedTripIds();
@@ -699,11 +767,48 @@ export function subscribeToTrips(
       if (!local) {
         chosen = remote;
       } else {
-        const isLocalNewer = (local.updatedAt || 0) > (remote.updatedAt || 0);
-        if (isLocalNewer || pendingTripWrites.has(remote.id)) {
-          chosen = reconcileSingleTrip(local, remote);
+        const recentlySavedUntil = recentlySavedTrips.get(remote.id) || 0;
+        const isRecentlySaved = Date.now() < recentlySavedUntil;
+        const isLocalNewerOrEqual = (local.updatedAt || 0) >= (remote.updatedAt || 0);
+        const remoteHasNoSchedule =
+          (!remote.schedule || remote.schedule.length === 0) &&
+          Boolean(local.schedule && local.schedule.length > 0);
+
+        if (isRecentlySaved || isLocalNewerOrEqual || remoteHasNoSchedule || pendingTripWrites.has(remote.id)) {
+          chosen = local;
         } else {
-          chosen = reconcileSingleTrip(remote, local);
+          chosen = { ...remote };
+          // Preserve local souvenir photos if remote has none or empty
+          if (local.souvenirTabs && chosen.souvenirTabs) {
+            const localPhotos = new Map<string, { imageUrl?: string; images?: string[] }>();
+            for (const tab of local.souvenirTabs) {
+              for (const itm of tab.items || []) {
+                if (itm && itm.id && (itm.imageUrl || (itm.images && itm.images.length > 0))) {
+                  localPhotos.set(itm.id, { imageUrl: itm.imageUrl, images: itm.images });
+                }
+              }
+            }
+            if (localPhotos.size > 0) {
+              chosen.souvenirTabs = chosen.souvenirTabs.map((tab) => ({
+                ...tab,
+                items: (tab.items || []).map((itm) => {
+                  const loc = localPhotos.get(itm.id);
+                  const remoteHasImg = Boolean(itm.imageUrl && itm.imageUrl.trim()) || (itm.images && itm.images.length > 0 && itm.images.some((i: string) => Boolean(i && i.trim())));
+                  if (!remoteHasImg && loc) {
+                    return {
+                      ...itm,
+                      imageUrl: loc.imageUrl || (loc.images && loc.images[0]),
+                      images: loc.images || (loc.imageUrl ? [loc.imageUrl] : [])
+                    };
+                  }
+                  return itm;
+                })
+              }));
+            }
+          }
+          if (!chosen.coverImage && local.coverImage) {
+            chosen.coverImage = local.coverImage;
+          }
         }
       }
       finalTrips.push({
@@ -721,33 +826,39 @@ export function subscribeToTrips(
       }
     }
 
-    const brand = getStoredBrandSettings();
+    const brand = (explicitBrand && Array.isArray(explicitBrand.tripOrder)) ? explicitBrand : getStoredBrandSettings();
     if (brand && Array.isArray(brand.tripOrder) && brand.tripOrder.length > 0) {
-      const orderMap = new Map(brand.tripOrder.map((id, index) => [id, index]));
+      const orderMap = new Map<string, number>(brand.tripOrder.map((id: string, index: number) => [id, index]));
       finalTrips.sort((a, b) => {
-        const idxA = orderMap.has(a.id) ? orderMap.get(a.id)! : 9999;
-        const idxB = orderMap.has(b.id) ? orderMap.get(b.id)! : 9999;
+        const idxA = (a.id && orderMap.has(a.id)) ? (orderMap.get(a.id) as number) : 9999;
+        const idxB = (b.id && orderMap.has(b.id)) ? (orderMap.get(b.id) as number) : 9999;
         return idxA - idxB;
       });
     }
 
-    saveTripsToLocalStorage(finalTrips);
-    saveTripsToIDB(finalTrips).catch((err) => {
-      console.error('상세 에러 (saveTripsToIDB snapshot):', err);
-    });
+    const hasChanges = haveTripsChanged(localTrips, finalTrips);
+    if (hasChanges) {
+      saveTripsToLocalStorage(finalTrips);
+      saveTripsToIDB(finalTrips).catch((err) => {
+        console.error('상세 에러 (saveTripsToIDB snapshot):', err);
+      });
 
-    updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
-    onUpdate(finalTrips);
+      updateSyncStatus('synced', '자동저장 완료 (실시간 동기화됨)');
+      onUpdate(finalTrips);
+    }
 
     resolveTripPhotosList(finalTrips).then((resolved) => {
       if (!isSubscribed) return;
       const cleanResolved = resolved.filter((t) => t && t.id && !deletedSet.has(t.id) && !(t as any).isDeleted);
-      saveTripsToIDB(cleanResolved).catch((err) => {
-        console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
-      });
-      const hasChanges = JSON.stringify(cleanResolved) !== JSON.stringify(finalTrips);
-      if (hasChanges) {
+      const photoChanges = haveTripsChanged(finalTrips, cleanResolved);
+      if (photoChanges) {
+        saveTripsToIDB(cleanResolved).catch((err) => {
+          console.error('상세 에러 (saveTripsToIDB resolved photos):', err);
+        });
         onUpdate(cleanResolved);
+        cleanResolved.forEach((rTrip) => {
+          saveTripToSupabase(rTrip, true).catch(() => {});
+        });
       }
     }).catch((photoErr) => {
       console.error('상세 에러 (resolveTripPhotosList):', photoErr);
@@ -792,11 +903,6 @@ export function subscribeToTrips(
             deleteTripFromIDB(id).catch(() => {});
           });
         }
-        if (payload.type === 'trips_updated' || payload.type === 'initial') {
-          if (Array.isArray(payload.trips)) {
-            handleIncomingTrips(payload.trips);
-          }
-        }
         if (payload.type === 'brand_updated' || payload.type === 'initial') {
           if (payload.brand) {
             safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(payload.brand));
@@ -807,6 +913,11 @@ export function subscribeToTrips(
                 console.error('[TripService] Brand listener error:', listenerErr);
               }
             });
+          }
+        }
+        if (payload.type === 'trips_updated' || payload.type === 'initial') {
+          if (Array.isArray(payload.trips)) {
+            handleIncomingTrips(payload.trips, payload.brand);
           }
         }
       } catch (parseErr) {
@@ -997,22 +1108,11 @@ export function subscribeToTrips(
 
   initSupabaseRealtime();
 
-  // C. Cross-device Fallback Polling (Every 4 seconds for instant mobile sync)
+  // C. Cross-device Fallback Polling (Every 5 seconds for instant multi-device sync)
   const pollTimer = setInterval(() => {
     if (!isSubscribed) return;
     if (typeof document !== 'undefined' && document.hidden) return;
 
-    // 1. Poll Server Hub
-    fetch('/api/sync/trips')
-      .then((res) => res.json())
-      .then((data) => {
-        if (data && Array.isArray(data.trips) && data.trips.length > 0) {
-          handleIncomingTrips(data.trips);
-        }
-      })
-      .catch(() => {});
-
-    // 2. Poll Supabase directly
     const sp = getSupabase();
     if (sp && isSupabaseConfigured()) {
       (async () => {
@@ -1042,8 +1142,18 @@ export function subscribeToTrips(
           }
         } catch {}
       })();
+    } else {
+      // Fallback to Server Hub
+      fetch('/api/sync/trips')
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data && Array.isArray(data.trips) && data.trips.length > 0) {
+            handleIncomingTrips(data.trips);
+          }
+        })
+        .catch(() => {});
     }
-  }, 4000);
+  }, 5000);
 
   const handleConfigChanged = () => {
     if (supabaseChannel && getSupabase()) {

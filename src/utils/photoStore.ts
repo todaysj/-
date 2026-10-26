@@ -36,16 +36,27 @@ function getIDB(): Promise<IDBDatabase | null> {
 }
 
 /**
- * Background sync to cloud photo storage (Supabase photos table if configured)
+ * Background sync to cloud and local server photo storage
  * Never blocks local UI or trip save operations.
  */
 function syncPhotoToCloudBackground(photoId: string, dataUrl: string) {
+  if (!photoId || !dataUrl) return;
+
+  // 1. Immediately sync to permanent server disk storage (/api/photos)
+  try {
+    fetch('/api/photos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoId, dataUrl })
+    }).catch(() => {});
+  } catch {}
+
+  // 2. Optional best-effort sync to Supabase photos table if created
   const supabase = getSupabase();
   if (!supabase || !isSupabaseConfigured()) return;
 
   (async () => {
     try {
-      // Optional best-effort sync to Supabase photos table if created
       await supabase.from('photos').upsert(
         {
           id: photoId,
@@ -54,9 +65,7 @@ function syncPhotoToCloudBackground(photoId: string, dataUrl: string) {
         },
         { onConflict: 'id' }
       );
-    } catch {
-      // Silent catch - local IDB preserves 100% of photos
-    }
+    } catch {}
   })().catch(() => {});
 }
 
@@ -154,9 +163,10 @@ export async function getPhotoLocal(
         return localVal;
       }
 
-      // 2b. Cursor scan JPlanner_Media_DB if key contains fallbackItemId or photoId
-      if (fallbackItemId || photoId) {
-        const targetToken = fallbackItemId || photoId;
+      // 2b. Cursor scan JPlanner_Media_DB if key contains fallbackItemId, photoId, or fallbackItemTitle
+      if (fallbackItemId || photoId || fallbackItemTitle) {
+        const targetToken = fallbackItemId || photoId || '';
+        const titleToken = fallbackItemTitle ? fallbackItemTitle.trim().toLowerCase() : '';
         const matched = await new Promise<string | null>((resolve) => {
           const tx = idb.transaction(STORE_NAME, 'readonly');
           const store = tx.objectStore(STORE_NAME);
@@ -164,9 +174,15 @@ export async function getPhotoLocal(
           req.onsuccess = (e: any) => {
             const cursor = e.target.result as IDBCursorWithValue;
             if (cursor) {
-              const k = String(cursor.key);
-              if (k.includes(targetToken)) {
-                return resolve(cursor.value as string);
+              const k = String(cursor.key).toLowerCase();
+              const isMatch = (targetToken && k.includes(targetToken.toLowerCase())) ||
+                (titleToken && k.includes(titleToken));
+              if (isMatch) {
+                const val = cursor.value;
+                const candidate = typeof val === 'string' ? val : (val?.dataUrl || val?.imageUrl || val?.url);
+                if (typeof candidate === 'string' && candidate.length > 20) {
+                  return resolve(candidate);
+                }
               }
               cursor.continue();
             } else {
@@ -178,29 +194,36 @@ export async function getPhotoLocal(
 
         if (matched) {
           if (photoId) savePhotoLocal(photoId, matched).catch(() => {});
+          if (fallbackItemId) savePhotoLocal(fallbackItemId, matched).catch(() => {});
           return matched;
         }
       }
     }
   } catch {}
 
-  // 3. Check Supabase `photos` table if configured
-  if (photoId) {
-    const supabase = getSupabase();
-    if (supabase && isSupabaseConfigured()) {
-      try {
-        const { data } = await supabase.from('photos').select('data_url').eq('id', photoId).maybeSingle();
-        if (data && typeof data.data_url === 'string') {
-          savePhotoLocal(photoId, data.data_url).catch(() => {});
-          return data.data_url;
+  // 2c. Check permanent server disk storage (/api/photos/:photoId)
+  if (photoId && typeof window !== 'undefined') {
+    try {
+      const cleanPhotoId = photoId.replace(/^photo:\/\//, '').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const res = await fetch(`/api/photos/${encodeURIComponent(cleanPhotoId)}`);
+      if (res.ok) {
+        const blob = await res.blob();
+        const base64 = await new Promise<string>((resolve) => {
+          const reader = new FileReader();
+          reader.onloadend = () => resolve((reader.result as string) || '');
+          reader.onerror = () => resolve('');
+          reader.readAsDataURL(blob);
+        });
+        if (base64 && base64.startsWith('data:image/')) {
+          memoryCache.set(photoId, base64);
+          if (uri) memoryCache.set(uri, base64);
+          return base64;
         }
-      } catch (err) {
-        // Silent catch
       }
-    }
+    } catch {}
   }
 
-  // 4. Search local backups in `JPlanner_Trips_DB` (both `trips_backups` and `trips_cache`)
+  // 3. Search local backups in `JPlanner_Trips_DB` (both `trips_backups` and `trips_cache`)
   try {
     if (typeof window !== 'undefined' && window.indexedDB) {
       const tripsIDB = await new Promise<IDBDatabase | null>((resolve) => {
@@ -240,7 +263,18 @@ export async function getPhotoLocal(
           }
         }
 
-        // Search through candidate trips for matching photo base64
+        const isGoodImage = (val: any): boolean => {
+          if (typeof val !== 'string') return false;
+          const trimmed = val.trim();
+          return (
+            (trimmed.startsWith('data:image/') && trimmed.length > 30) ||
+            trimmed.startsWith('http://') ||
+            trimmed.startsWith('https://') ||
+            trimmed.startsWith('blob:')
+          );
+        };
+
+        // Search through candidate trips for matching photo
         for (const t of candidateTrips) {
           const checkItem = (item: any): string | null => {
             if (!item) return null;
@@ -251,14 +285,16 @@ export async function getPhotoLocal(
             if (matchesId || matchesPhotoId || matchesTitle) {
               if (item.images && Array.isArray(item.images)) {
                 for (const img of item.images) {
-                  if (typeof img === 'string' && img.startsWith('data:image/')) {
+                  if (isGoodImage(img)) {
                     if (photoId) savePhotoLocal(photoId, img).catch(() => {});
+                    if (fallbackItemId) savePhotoLocal(fallbackItemId, img).catch(() => {});
                     return img;
                   }
                 }
               }
-              if (typeof item.imageUrl === 'string' && item.imageUrl.startsWith('data:image/')) {
+              if (isGoodImage(item.imageUrl)) {
                 if (photoId) savePhotoLocal(photoId, item.imageUrl).catch(() => {});
+                if (fallbackItemId) savePhotoLocal(fallbackItemId, item.imageUrl).catch(() => {});
                 return item.imageUrl;
               }
             }
@@ -339,8 +375,46 @@ export async function getPhotoByItemOrFallback(
 }
 
 /**
+ * Automatically uploads a base64 photo to permanent server disk storage and Supabase storage
+ * returning a permanent HTTP URL that never disappears or gets stripped by browser storage.
+ */
+export async function uploadPhotoToCloudOrServer(
+  photoId: string,
+  dataUrl: string,
+  tripId = 'general'
+): Promise<string> {
+  if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+    return dataUrl || '';
+  }
+
+  const cleanId = photoId ? photoId.replace(/^photo:\/\//, '').replace(/[^a-zA-Z0-9_-]/g, '_') : `photo_${Date.now()}`;
+
+  // 1. Post to local server persistent disk storage (/api/photos)
+  try {
+    const res = await fetch('/api/photos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ photoId: cleanId, dataUrl })
+    });
+    if (res.ok) {
+      const json = await res.json();
+      if (json.publicUrl && typeof json.publicUrl === 'string' && json.publicUrl.startsWith('http')) {
+        return json.publicUrl;
+      }
+      if (json.url) {
+        return json.url;
+      }
+    }
+  } catch (err) {
+    console.warn('[PhotoStore] Server upload notice:', err);
+  }
+
+  return dataUrl;
+}
+
+/**
  * Scans all souvenir items in a trip and automatically recovers any missing photos
- * from IndexedDB backups, cache, and dedicated photo storage.
+ * from IndexedDB backups, cache, and dedicated photo storage, upgrading them to permanent URLs.
  */
 export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; recoveredCount: number }> {
   if (!trip) return { trip, recoveredCount: 0 };
@@ -357,7 +431,10 @@ export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; reco
         if (typeof img === 'string' && img.startsWith('photo://')) {
           const resolved = await getPhotoLocal(img, item.id, item.title);
           if (resolved) {
-            resolvedList.push(resolved);
+            const permUrl = resolved.startsWith('data:image/')
+              ? await uploadPhotoToCloudOrServer(img, resolved, cloned.id)
+              : resolved;
+            resolvedList.push(permUrl);
             recoveredCount++;
           } else {
             resolvedList.push(img);
@@ -375,9 +452,12 @@ export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; reco
     if (item.imageUrl && typeof item.imageUrl === 'string' && item.imageUrl.startsWith('photo://')) {
       const resolved = await getPhotoLocal(item.imageUrl, item.id, item.title);
       if (resolved) {
-        item.imageUrl = resolved;
+        const permUrl = resolved.startsWith('data:image/')
+          ? await uploadPhotoToCloudOrServer(item.imageUrl, resolved, cloned.id)
+          : resolved;
+        item.imageUrl = permUrl;
         if (!item.images || item.images.length === 0) {
-          item.images = [resolved];
+          item.images = [permUrl];
         }
         recoveredCount++;
       }
@@ -391,8 +471,11 @@ export async function recoverAllTripPhotos(trip: any): Promise<{ trip: any; reco
     if (stillHasNoImages) {
       const recovered = await getPhotoLocal('', item.id, item.title);
       if (recovered) {
-        item.imageUrl = recovered;
-        item.images = [recovered];
+        const permUrl = recovered.startsWith('data:image/')
+          ? await uploadPhotoToCloudOrServer(item.id, recovered, cloned.id)
+          : recovered;
+        item.imageUrl = permUrl;
+        item.images = [permUrl];
         recoveredCount++;
       }
     }

@@ -33,6 +33,7 @@ import {
 import { parseTripBackup } from '../utils/backupUtils';
 import { getTripChecklistTabs, getTripSouvenirTabs, getTagColorInfo } from '../utils/tabUtils';
 import { resolveTripPhotos } from '../utils/imageUtils';
+import { timeStringToMinutes } from '../utils/dateUtils';
 import html2pdf from 'html2pdf.js';
 
 interface ExportModalProps {
@@ -54,6 +55,8 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   const [isGeneratingPDF, setIsGeneratingPDF] = useState(false);
   const [isExportingJSON, setIsExportingJSON] = useState(false);
   const [isExportingAllJSON, setIsExportingAllJSON] = useState(false);
+  const [exportNotice, setExportNotice] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
+  const [jsonCopied, setJsonCopied] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [activePreviewTab, setActivePreviewTab] = useState<'visual' | 'markdown'>('visual');
 
@@ -373,7 +376,10 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
   const handleDownloadPDF = async () => {
     if (!hasAnySectionSelected) {
-      alert('최소 1개 이상의 내보내기 항목(일정, 체크리스트, 기념품 등)을 선택해주세요.');
+      setExportNotice({
+        message: '최소 1개 이상의 내보내기 항목(일정, 체크리스트, 기념품 등)을 선택해주세요.',
+        type: 'error'
+      });
       return;
     }
 
@@ -557,7 +563,6 @@ export const ExportModal: React.FC<ExportModalProps> = ({
         if (onImportTrip && result.trips.length > 0) {
           const target = result.trips.find((t) => t.id === result.targetTripId) || result.trips[0];
           onImportTrip(target);
-          alert(result.message);
           onClose();
         }
       } catch (err: any) {
@@ -920,12 +925,24 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
               <div className="flex flex-col sm:flex-row gap-2">
                 <button
+                  type="button"
                   onClick={async () => {
                     try {
                       setIsExportingJSON(true);
-                      await exportTripAsJSONFile(resolvedTrip);
+                      setExportNotice(null);
+                      await exportTripAsJSONFile(resolvedTrip || trip);
+                      setExportNotice({
+                        message: '현재 여행 백업 파일이 다운로드되었습니다.',
+                        type: 'success'
+                      });
                     } catch (e: any) {
-                      alert('백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
+                      console.warn('Client export error, using direct server download:', e);
+                      // Guaranteed direct server download fallback
+                      window.location.href = `/api/backup/trip/${encodeURIComponent(trip.id)}`;
+                      setExportNotice({
+                        message: '서버를 통해 현재 여행 백업 파일 다운로드가 시작되었습니다.',
+                        type: 'success'
+                      });
                     } finally {
                       setIsExportingJSON(false);
                     }
@@ -936,7 +953,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                   {isExportingJSON ? (
                     <>
                       <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>사진 병합 중...</span>
+                      <span>파일 생성 중...</span>
                     </>
                   ) : (
                     <>
@@ -947,12 +964,24 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                 </button>
 
                 <button
+                  type="button"
                   onClick={async () => {
                     try {
                       setIsExportingAllJSON(true);
-                      await exportFullBackupJSONFile(allTrips && allTrips.length > 0 ? allTrips : [resolvedTrip], brandSettings);
+                      setExportNotice(null);
+                      await exportFullBackupJSONFile(allTrips && allTrips.length > 0 ? allTrips : [resolvedTrip || trip], brandSettings);
+                      setExportNotice({
+                        message: '전체 여행 통합 백업 파일이 다운로드되었습니다.',
+                        type: 'success'
+                      });
                     } catch (e: any) {
-                      alert('전체 백업 파일 생성 중 오류가 발생했습니다: ' + (e?.message || '알 수 없는 오류'));
+                      console.warn('Client full export error, using direct server download:', e);
+                      // Guaranteed direct server download fallback
+                      window.location.href = '/api/backup/all';
+                      setExportNotice({
+                        message: '서버를 통해 전체 여행 통합 백업 파일 다운로드가 시작되었습니다.',
+                        type: 'success'
+                      });
                     } finally {
                       setIsExportingAllJSON(false);
                     }
@@ -973,7 +1002,50 @@ export const ExportModal: React.FC<ExportModalProps> = ({
                     </>
                   )}
                 </button>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      const jsonStr = JSON.stringify(resolvedTrip, null, 2);
+                      await navigator.clipboard.writeText(jsonStr);
+                      setJsonCopied(true);
+                      setExportNotice({
+                        message: '클립보드에 백업 데이터(JSON)가 복사되었습니다. (파일 다운로드가 차단되는 환경에서도 안심하고 보관 가능)',
+                        type: 'success'
+                      });
+                      setTimeout(() => setJsonCopied(false), 3000);
+                    } catch {
+                      setExportNotice({
+                        message: '클립보드 복사 권한이 제한되었습니다.',
+                        type: 'error'
+                      });
+                    }
+                  }}
+                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-lg border border-slate-300 transition cursor-pointer flex items-center justify-center space-x-1"
+                  title="브라우저에서 파일 저장이 차단될 때 텍스트로 바로 복사합니다"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>{jsonCopied ? '복사됨!' : 'JSON 복사'}</span>
+                </button>
               </div>
+
+              {exportNotice && (
+                <div className={`mt-2 p-2.5 rounded-lg text-xs font-medium flex items-center justify-between gap-2 ${
+                  exportNotice.type === 'success'
+                    ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    : 'bg-rose-50 text-rose-800 border border-rose-200'
+                }`}>
+                  <span>{exportNotice.message}</span>
+                  <button
+                    type="button"
+                    onClick={() => setExportNotice(null)}
+                    className="text-xs opacity-60 hover:opacity-100 font-bold"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
             </div>
           </div>
 
@@ -1126,7 +1198,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
 
                           const daySchedules = (resolvedTrip.schedule || [])
                             .filter((s) => s.day === dayNum)
-                            .sort((a, b) => a.time.localeCompare(b.time));
+                            .sort((a, b) => timeStringToMinutes(a.time) - timeStringToMinutes(b.time));
 
                           return (
                             <div

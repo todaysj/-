@@ -18,7 +18,7 @@ import {
 interface TripOrderModalProps {
   trips: Trip[];
   onClose: () => void;
-  onSaveTripOrder: (newOrderedTrips: Trip[]) => void;
+  onSaveTripOrder: (newOrderedTrips: Trip[]) => Promise<void> | void;
 }
 
 export const TripOrderModal: React.FC<TripOrderModalProps> = ({
@@ -30,13 +30,17 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
   const [draggedIndex, setDraggedIndex] = useState<number | null>(null);
   const [dragOverIndex, setDragOverIndex] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const hasUserModifiedRef = React.useRef(false);
 
   useEffect(() => {
-    setOrderedTrips([...trips]);
+    if (!hasUserModifiedRef.current) {
+      setOrderedTrips([...trips]);
+    }
   }, [trips]);
 
   const handleMoveUp = (index: number) => {
     if (index <= 0) return;
+    hasUserModifiedRef.current = true;
     const newItems = [...orderedTrips];
     const temp = newItems[index];
     newItems[index] = newItems[index - 1];
@@ -46,6 +50,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
 
   const handleMoveDown = (index: number) => {
     if (index >= orderedTrips.length - 1) return;
+    hasUserModifiedRef.current = true;
     const newItems = [...orderedTrips];
     const temp = newItems[index];
     newItems[index] = newItems[index + 1];
@@ -55,6 +60,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
 
   const handleMoveToTop = (index: number) => {
     if (index <= 0) return;
+    hasUserModifiedRef.current = true;
     const newItems = [...orderedTrips];
     const [item] = newItems.splice(index, 1);
     newItems.unshift(item);
@@ -63,6 +69,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
 
   const handleMoveToBottom = (index: number) => {
     if (index >= orderedTrips.length - 1) return;
+    hasUserModifiedRef.current = true;
     const newItems = [...orderedTrips];
     const [item] = newItems.splice(index, 1);
     newItems.push(item);
@@ -85,6 +92,7 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
       setDragOverIndex(null);
       return;
     }
+    hasUserModifiedRef.current = true;
     const newItems = [...orderedTrips];
     const [removed] = newItems.splice(draggedIndex, 1);
     newItems.splice(index, 0, removed);
@@ -94,14 +102,15 @@ export const TripOrderModal: React.FC<TripOrderModalProps> = ({
   };
 
   const handleReset = () => {
+    hasUserModifiedRef.current = false;
     setOrderedTrips([...trips]);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (isSaving) return;
     setIsSaving(true);
     try {
-      onSaveTripOrder(orderedTrips);
+      await onSaveTripOrder(orderedTrips);
       onClose();
     } catch (err) {
       console.error('상세 에러 (TripOrderModal handleSave):', err);

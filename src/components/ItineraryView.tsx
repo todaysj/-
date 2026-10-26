@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Trip, ScheduleItem, CategoryType } from '../types';
-import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy, Calendar, Save, RefreshCw } from 'lucide-react';
+import { Plus, Check, Clock, MapPin, Tag, Trash2, ExternalLink, Download, Edit3, AlertTriangle, AlertCircle, Copy, Calendar, Save, RefreshCw, RotateCcw } from 'lucide-react';
 import { AsyncImage } from './AsyncImage';
 import { getGoogleMapsUrl } from '../utils/placeSearch';
 import {
@@ -11,7 +11,8 @@ import {
   formatDayDateFull,
   formatTripNightsAndDays,
   cleanTripTitle,
-  getAutoLinkedTimes
+  getAutoLinkedTimes,
+  timeStringToMinutes
 } from '../utils/dateUtils';
 
 interface ItineraryViewProps {
@@ -27,6 +28,9 @@ interface ItineraryViewProps {
   onManualSave?: () => void;
   isManualSaving?: boolean;
   isSaveSuccess?: boolean;
+  canUndo?: boolean;
+  undoCount?: number;
+  onUndo?: () => void;
 }
 
 export const ItineraryView: React.FC<ItineraryViewProps> = ({
@@ -41,7 +45,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
   onOpenExportModal,
   onManualSave,
   isManualSaving = false,
-  isSaveSuccess = false
+  isSaveSuccess = false,
+  canUndo = false,
+  undoCount = 0,
+  onUndo
 }) => {
   const [selectedDay, setSelectedDay] = useState<number>(1);
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -60,6 +67,30 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     }
   }, [totalDays, selectedDay]);
 
+  // Keyboard shortcut listener for Ctrl+Z / Cmd+Z to undo
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+        const target = e.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable)
+        ) {
+          return;
+        }
+        if (canUndo && onUndo) {
+          e.preventDefault();
+          onUndo();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [canUndo, onUndo]);
+
   // Filter schedules
   const filteredSchedules = trip.schedule.filter((item) => {
     const matchDay = selectedDay === 0 ? item.day <= totalDays : item.day === selectedDay;
@@ -67,9 +98,10 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
     return matchDay && matchCategory;
   }).sort((a, b) => {
     if (a.day !== b.day) return a.day - b.day;
-    const timeCmp = a.time.localeCompare(b.time);
-    if (timeCmp !== 0) return timeCmp;
-    return 0;
+    const aMin = timeStringToMinutes(a.time);
+    const bMin = timeStringToMinutes(b.time);
+    if (aMin !== bMin) return aMin - bMin;
+    return (a.endTime ? timeStringToMinutes(a.endTime) : aMin) - (b.endTime ? timeStringToMinutes(b.endTime) : bMin);
   });
 
   // Category Badge Colors & Labels
@@ -244,14 +276,28 @@ export const ItineraryView: React.FC<ItineraryViewProps> = ({
           })}
         </div>
 
-        {/* Add Event Button for active day */}
-        <button
-          onClick={() => onOpenAddModal(selectedDay === 0 ? 1 : selectedDay)}
-          className="w-full sm:w-auto inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm transition shrink-0 cursor-pointer"
-        >
-          <Plus className="w-4 h-4" />
-          <span>{selectedDay > 0 ? `Day ${selectedDay} 일정 추가` : '새 일정 추가'}</span>
-        </button>
+        {/* Action Buttons: Undo & Add Event */}
+        <div className="flex items-center gap-2 w-full sm:w-auto shrink-0">
+          {canUndo && onUndo && (
+            <button
+              onClick={onUndo}
+              title="직전 작업 취소 (단축키: Ctrl+Z 또는 Cmd+Z)"
+              className="flex-1 sm:flex-initial inline-flex items-center justify-center space-x-1.5 px-3.5 py-2.5 bg-amber-500/10 hover:bg-amber-500/20 active:scale-95 text-amber-800 border border-amber-300 rounded-xl text-xs sm:text-sm font-bold shadow-2xs transition shrink-0 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-600 stroke-[2.5]" />
+              <span>직전 작업 취소{undoCount > 0 ? ` (${undoCount})` : ''}</span>
+            </button>
+          )}
+
+          {/* Add Event Button for active day */}
+          <button
+            onClick={() => onOpenAddModal(selectedDay === 0 ? 1 : selectedDay)}
+            className="flex-1 sm:flex-initial inline-flex items-center justify-center space-x-2 px-4 py-2.5 bg-sky-600 hover:bg-sky-500 text-white text-xs sm:text-sm font-bold rounded-xl shadow-sm transition shrink-0 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>{selectedDay > 0 ? `Day ${selectedDay} 일정 추가` : '새 일정 추가'}</span>
+          </button>
+        </div>
       </div>
 
       {/* Filter by Category Bar */}

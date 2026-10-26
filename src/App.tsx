@@ -18,9 +18,9 @@ import { PasswordPromptModal } from './components/PasswordPromptModal';
 import { TripOrderModal } from './components/TripOrderModal';
 import { SiteLockScreen } from './components/SiteLockScreen';
 import { SupabaseSetupBanner } from './components/SupabaseSetupBanner';
-import { CheckCircle2, WifiOff, AlertTriangle, X, Upload } from 'lucide-react';
+import { CheckCircle2, WifiOff, AlertTriangle, X, Upload, RotateCcw } from 'lucide-react';
 import { calculateEventDate } from './utils/currencyUtils';
-import { getTotalTripDays, adjustSubsequentSchedules } from './utils/dateUtils';
+import { getTotalTripDays, adjustSubsequentSchedules, timeStringToMinutes } from './utils/dateUtils';
 import {
   subscribeToTrips,
   saveTripToFirestore,
@@ -36,11 +36,12 @@ import {
   isQuotaExceeded,
   markTripAsDeleted,
   getDeletedTripIds,
+  safeLocalStorageSet,
+  STORAGE_BRAND_KEY,
   SyncStatus
 } from './lib/tripService';
 import { getAllLocalPhotos, savePhotoToCloud } from './utils/photoStore';
-import { resolveTripPhotos } from './utils/imageUtils';
-import { getTripsFromIDB, saveTripsToIDB, saveTripBackup } from './utils/tripIndexedDB';
+import { getTripsFromIDB, saveTripsToIDB } from './utils/tripIndexedDB';
 import { parseTripBackup } from './utils/backupUtils';
 
 const STORAGE_LAST_TRIP_KEY = 'jplanner_last_active_trip_id';
@@ -136,8 +137,20 @@ const DEFAULT_STARTER_TRIP: Trip = {
   updatedAt: Date.now()
 };
 
+export interface ScheduleHistorySnapshot {
+  tripId: string;
+  schedule: ScheduleItem[];
+  expenses: ExpenseItem[];
+  description: string;
+}
+
 export default function App() {
   const [trips, setTrips] = useState<Trip[]>(() => getStoredTrips());
+  const tripsRef = useRef<Trip[]>(trips);
+  useEffect(() => {
+    tripsRef.current = trips;
+  }, [trips]);
+
   const initialBrand = getStoredBrandSettings();
   const userExplicitlySelectedRef = useRef<boolean>(false);
   const cloudActiveTripIdRef = useRef<string | undefined>(initialBrand.activeTripId);
@@ -280,6 +293,40 @@ export default function App() {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isTripOrderModalOpen, setIsTripOrderModalOpen] = useState(false);
 
+  // Schedule Undo History Stack (stores up to 20 previous snapshots per trip)
+  const [scheduleHistory, setScheduleHistory] = useState<ScheduleHistorySnapshot[]>([]);
+
+  const pushScheduleHistory = (trip: Trip, actionDescription: string) => {
+    setScheduleHistory((prev) => [
+      {
+        tripId: trip.id,
+        schedule: JSON.parse(JSON.stringify(trip.schedule || [])),
+        expenses: JSON.parse(JSON.stringify(trip.expenses || [])),
+        description: actionDescription
+      },
+      ...prev.slice(0, 19)
+    ]);
+  };
+
+  const handleUndoSchedule = () => {
+    if (!activeTrip) return;
+    const targetIndex = scheduleHistory.findIndex((h) => h.tripId === activeTrip.id);
+    if (targetIndex === -1) return;
+
+    const snapshotToRestore = scheduleHistory[targetIndex];
+    const newHistory = scheduleHistory.filter((_, idx) => idx !== targetIndex);
+
+    updateActiveTrip((trip) => ({
+      ...trip,
+      schedule: snapshotToRestore.schedule,
+      expenses: snapshotToRestore.expenses
+    }), true);
+
+    setScheduleHistory(newHistory);
+    setToastMessage(`직전 작업이 취소되었습니다. (${snapshotToRestore.description} 취소)`);
+    setTimeout(() => setToastMessage(null), 3500);
+  };
+
   // Helper to switch active trip, sync URL and save to localStorage (Zero cloud writes on tab switch)
   const handleSelectTrip = (tripId: string) => {
     userExplicitlySelectedRef.current = true;
@@ -382,18 +429,24 @@ export default function App() {
     });
   };
 
-  // Helper to update active trip locally & persist to Firestore
-  const updateActiveTrip = (updater: (trip: Trip) => Trip) => {
-    let nextUpdatedTrip: Trip | null = null;
-    setTrips((prevTrips) => {
-      const current = prevTrips.find((t) => t.id === activeTripId) || prevTrips[0];
-      if (!current) return prevTrips;
-      nextUpdatedTrip = { ...updater(current), updatedAt: Date.now() };
-      return prevTrips.map((t) => (t.id === current.id ? nextUpdatedTrip! : t));
-    });
-    if (nextUpdatedTrip) {
-      saveTripToFirestore(nextUpdatedTrip);
-    }
+  // Helper to update active trip locally & persist automatically to Cloud & Storage
+  const updateActiveTrip = (updater: (trip: Trip) => Trip, forceImmediate: boolean = false) => {
+    const prevTrips = tripsRef.current && tripsRef.current.length > 0 ? tripsRef.current : trips;
+    const current = prevTrips.find((t) => t.id === activeTripId) || prevTrips[0];
+    if (!current) return;
+
+    const nextUpdatedTrip: Trip = { ...updater(current), updatedAt: Date.now() };
+    const nextTrips = prevTrips.map((t) => (t.id === current.id ? nextUpdatedTrip : t));
+
+    tripsRef.current = nextTrips;
+    setTrips(nextTrips);
+
+    // 1. Instantly save to LocalStorage and IndexedDB
+    saveTripsToLocalStorage(nextTrips);
+    saveTripsToIDB(nextTrips).catch(() => {});
+
+    // 2. Automatically save to Supabase & Server Hub without needing manual button click
+    saveTripToFirestore(nextUpdatedTrip, forceImmediate);
   };
 
   // Manual Cloud Save Handler: forces immediate synchronization to Firestore and persists full local cache
@@ -402,7 +455,9 @@ export default function App() {
     setIsManualSaving(true);
     setIsSaveSuccess(false);
     try {
-      const current = activeTrip;
+      const current = (tripsRef.current && tripsRef.current.length > 0
+        ? tripsRef.current.find((t) => t.id === activeTripId)
+        : null) || activeTrip;
       if (!current) {
         setIsManualSaving(false);
         return;
@@ -412,15 +467,16 @@ export default function App() {
         updatedAt: Date.now()
       };
 
-      // 1. Force direct write active trip to Firestore (with non-blocking 1500ms safety timeout)
-      await saveTripToFirestore(timestampedTrip, true);
-
-      // 2. Persist in local storage & IndexedDB cache for 100% offline persistence
-      const currentTrips = trips.map((t) => (t.id === timestampedTrip.id ? timestampedTrip : t));
+      // 1. Immediately update local state, reference, and offline caches
+      const prevList = tripsRef.current && tripsRef.current.length > 0 ? tripsRef.current : trips;
+      const currentTrips = prevList.map((t) => (t.id === timestampedTrip.id ? timestampedTrip : t));
+      tripsRef.current = currentTrips;
       setTrips(currentTrips);
       saveTripsToLocalStorage(currentTrips);
       await saveTripsToIDB(currentTrips).catch(() => {});
-      await saveTripBackup(timestampedTrip).catch(() => {});
+
+      // 2. Force direct write active trip to Cloud & Supabase
+      await saveTripToFirestore(timestampedTrip, true);
 
       // 3. Preserve user's configured trip order — NEVER forcefully move active trip to front!
       const currentOrder = tripOrderRef.current && tripOrderRef.current.length > 0
@@ -464,11 +520,13 @@ export default function App() {
   };
 
   // Brand Header & Tab Order Handlers
-  const handleSaveBrand = (
+  const handleSaveBrand = async (
     title: string,
     subtitle: string,
     badge: string,
-    newTabOrder?: TabType[]
+    newTabOrder?: TabType[],
+    newTripOrder?: string[],
+    newActiveTripId?: string
   ) => {
     setBrandTitle(title);
     setBrandSubtitle(subtitle);
@@ -477,14 +535,25 @@ export default function App() {
     if (newTabOrder) {
       setTabOrder(newTabOrder);
     }
-    saveBrandSettingsToFirestore({
+    const finalTripOrder = newTripOrder && newTripOrder.length > 0 ? newTripOrder : tripOrderRef.current;
+    if (newTripOrder && newTripOrder.length > 0) {
+      setTripOrder(newTripOrder);
+      tripOrderRef.current = newTripOrder;
+      setTrips((prev) => sortTripsWithOrder(prev, newTripOrder));
+    }
+    const finalActiveTripId = newActiveTripId || activeTripId;
+    if (newActiveTripId) {
+      setActiveTripId(newActiveTripId);
+      cloudActiveTripIdRef.current = newActiveTripId;
+    }
+    await saveBrandSettingsToFirestore({
       title,
       subtitle,
       badge,
       tabOrder: orderToSave,
       adminPassword,
-      tripOrder: tripOrderRef.current,
-      activeTripId
+      tripOrder: finalTripOrder,
+      activeTripId: finalActiveTripId
     }, true);
   };
 
@@ -527,17 +596,16 @@ export default function App() {
     setTripOrder(newOrderIds);
     tripOrderRef.current = newOrderIds;
 
+    const topTripId = newOrderIds[0];
+
     // 1. Immediately persist new trips order to localStorage & IDB
     saveTripsToLocalStorage(newOrderedTrips);
     saveTripsToIDB(newOrderedTrips).catch(() => {});
 
-    // 2. Sync ordered trips to Server Hub so data/trips.json reflects the new order
-    syncAllTripsToServer(newOrderedTrips).catch(() => {});
-
-    const topTripId = newOrderIds[0];
-
-    // 3. Save brand settings with forceDirect = true to guarantee instant cloud & server persistence
-    await saveBrandSettingsToFirestore({
+    // 2. Immediately cache in localStorage brand settings
+    const storedBrand = getStoredBrandSettings();
+    const updatedBrand = {
+      ...storedBrand,
       title: brandTitle,
       subtitle: brandSubtitle,
       badge: brandBadge,
@@ -545,9 +613,16 @@ export default function App() {
       adminPassword,
       tripOrder: newOrderIds,
       activeTripId: topTripId
-    }, true);
+    };
+    safeLocalStorageSet(STORAGE_BRAND_KEY, JSON.stringify(updatedBrand));
 
-    // 4. Update active trip & URL so refreshing the browser immediately honors the new first trip
+    // 3. Save brand settings with forceDirect = true to guarantee cloud & server persistence first
+    await saveBrandSettingsToFirestore(updatedBrand, true);
+
+    // 4. Sync ordered trips to Server Hub so data/trips.json reflects the new order
+    await syncAllTripsToServer(newOrderedTrips).catch(() => {});
+
+    // 5. Update active trip & URL so refreshing the browser immediately honors the new first trip
     if (topTripId) {
       cloudActiveTripIdRef.current = topTripId;
       setActiveTripId(topTripId);
@@ -569,6 +644,10 @@ export default function App() {
 
   // Handlers for Itinerary
   const handleToggleScheduleDone = (itemId: string) => {
+    if (activeTrip) {
+      const item = activeTrip.schedule.find((s) => s.id === itemId);
+      pushScheduleHistory(activeTrip, item ? `"${item.title}" 완료 토글` : '일정 상태 변경');
+    }
     updateActiveTrip((trip) => ({
       ...trip,
       schedule: trip.schedule.map((s) =>
@@ -578,21 +657,36 @@ export default function App() {
   };
 
   const handleDeleteScheduleItem = (itemId: string) => {
+    if (activeTrip) {
+      const item = activeTrip.schedule.find((s) => s.id === itemId);
+      pushScheduleHistory(activeTrip, item ? `"${item.title}" 삭제` : '일정 삭제');
+    }
     updateActiveTrip((trip) => ({
       ...trip,
       schedule: trip.schedule.filter((s) => s.id !== itemId),
       expenses: (trip.expenses || []).filter(
         (e) => e.scheduleItemId !== itemId && e.id !== `exp-sched-${itemId}`
       )
-    }));
+    }), true);
+    setToastMessage('일정이 삭제되었습니다.');
+    setTimeout(() => setToastMessage(null), 3000);
   };
 
   const handleSaveScheduleItem = (
     savedItem: ScheduleItem,
     insertAfterId?: string,
-    shiftSubsequent: boolean = true
+    shiftSubsequent: boolean = false
   ) => {
     let shiftedCount = 0;
+    if (activeTrip) {
+      const exists = activeTrip.schedule.some((s) => s.id === savedItem.id);
+      pushScheduleHistory(
+        activeTrip,
+        exists
+          ? `"${savedItem.title}" 일정 수정${shiftSubsequent ? ' (자동 순연)' : ''}`
+          : `"${savedItem.title}" 일정 추가${shiftSubsequent ? ' (자동 순연)' : ''}`
+      );
+    }
     updateActiveTrip((trip) => {
       const exists = trip.schedule.some((s) => s.id === savedItem.id);
       let newSchedule: ScheduleItem[];
@@ -619,6 +713,15 @@ export default function App() {
         newSchedule = result.updatedSchedule;
         shiftedCount = result.shiftedCount;
       }
+
+      // Chronologically sort newSchedule strictly by day, start time, and end time
+      newSchedule.sort((a, b) => {
+        if (a.day !== b.day) return a.day - b.day;
+        const aMin = timeStringToMinutes(a.time);
+        const bMin = timeStringToMinutes(b.time);
+        if (aMin !== bMin) return aMin - bMin;
+        return (a.endTime ? timeStringToMinutes(a.endTime) : aMin) - (b.endTime ? timeStringToMinutes(b.endTime) : bMin);
+      });
 
       // 🌟 Synchronize schedule item cost to Budget & Expenses (예산 & 가계부 연동)
       const linkedExpenseId = `exp-sched-${savedItem.id}`;
@@ -675,10 +778,13 @@ export default function App() {
         schedule: newSchedule,
         expenses: updatedExpenses
       };
-    });
+    }, true);
     if (shiftedCount > 0) {
       setToastMessage(`일정이 저장되고, 뒤의 ${shiftedCount}개 일정이 자동 순연되었습니다.`);
-      setTimeout(() => setToastMessage(null), 3500);
+      setTimeout(() => setToastMessage(null), 4000);
+    } else {
+      setToastMessage('일정이 성공적으로 저장되었습니다.');
+      setTimeout(() => setToastMessage(null), 2500);
     }
   };
 
@@ -824,8 +930,14 @@ export default function App() {
   };
 
   const handleSaveTrip = (updatedTrip: Trip) => {
-    setTrips((prev) => prev.map((t) => (t.id === updatedTrip.id ? updatedTrip : t)));
-    saveTripToFirestore(updatedTrip);
+    const timestamped: Trip = { ...updatedTrip, updatedAt: Date.now() };
+    const prevTrips = tripsRef.current && tripsRef.current.length > 0 ? tripsRef.current : trips;
+    const nextTrips = prevTrips.map((t) => (t.id === timestamped.id ? timestamped : t));
+    tripsRef.current = nextTrips;
+    setTrips(nextTrips);
+    saveTripsToLocalStorage(nextTrips);
+    saveTripsToIDB(nextTrips).catch(() => {});
+    saveTripToFirestore(timestamped, true);
   };
 
   // Handlers for Reservations
@@ -877,7 +989,7 @@ export default function App() {
     updateActiveTrip((trip) => ({
       ...trip,
       expenses: trip.expenses.filter((e) => e.id !== id)
-    }));
+    }), true);
   };
 
   const handleUpdateMembers = (newMembers: string[]) => {
@@ -981,7 +1093,6 @@ export default function App() {
         ? prev.map((t) => (t.id === importedTrip.id ? importedTrip : t))
         : [importedTrip, ...prev];
       saveTripsToIDB(updated).catch(() => {});
-      saveTripBackup(importedTrip).catch(() => {});
       return updated;
     });
 
@@ -1015,9 +1126,6 @@ export default function App() {
         await saveTripsToIDB(result.trips).catch((err) => {
           console.error('IDB save error during restore:', err);
         });
-        for (const trip of result.trips) {
-          saveTripBackup(trip).catch(() => {});
-        }
         saveTripsToLocalStorage(result.trips);
 
         // 2. Restore brand settings if included in backup
@@ -1224,6 +1332,9 @@ export default function App() {
             onManualSave={handleManualSave}
             isManualSaving={isManualSaving}
             isSaveSuccess={isSaveSuccess}
+            canUndo={activeTrip ? scheduleHistory.some((h) => h.tripId === activeTrip.id) : false}
+            undoCount={activeTrip ? scheduleHistory.filter((h) => h.tripId === activeTrip.id).length : 0}
+            onUndo={handleUndoSchedule}
           />
         )}
 
@@ -1370,13 +1481,23 @@ export default function App() {
         }
       />
 
-      {/* Floating Toast Notification (Success) */}
+      {/* Floating Toast Notification (Success with Undo action) */}
       {toastMessage && (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2.5 px-5 py-3 bg-slate-900 text-white text-xs sm:text-sm font-bold rounded-2xl shadow-2xl border border-slate-700/80 animate-fade-in pointer-events-none">
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center space-x-2.5 px-4 sm:px-5 py-3 bg-slate-900 text-white text-xs sm:text-sm font-bold rounded-2xl shadow-2xl border border-slate-700/80 animate-fade-in max-w-[92vw]">
           <div className="p-1 bg-emerald-500/20 text-emerald-400 rounded-lg shrink-0">
             <CheckCircle2 className="w-4 h-4" />
           </div>
-          <span>{toastMessage}</span>
+          <span className="truncate">{toastMessage}</span>
+          {activeTrip && scheduleHistory.some((h) => h.tripId === activeTrip.id) && (
+            <button
+              onClick={handleUndoSchedule}
+              className="ml-2 px-2.5 py-1 bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 text-xs font-black rounded-lg transition shrink-0 flex items-center space-x-1 cursor-pointer shadow-xs"
+              title="직전 작업 취소 (Ctrl+Z)"
+            >
+              <RotateCcw className="w-3.5 h-3.5 stroke-[2.5]" />
+              <span>되돌리기</span>
+            </button>
+          )}
         </div>
       )}
 

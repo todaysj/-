@@ -9,10 +9,14 @@ import imageCompression from 'browser-image-compression';
 const STORAGE_SUPABASE_URL_KEY = 'jplanner_supabase_url';
 const STORAGE_SUPABASE_ANON_KEY = 'jplanner_supabase_anon_key';
 
+declare const __SUPABASE_URL__: string | undefined;
+declare const __SUPABASE_ANON_KEY__: string | undefined;
+
 // Default Supabase config resolution:
 // 1. window / localStorage overrides
-// 2. Vite environment variables (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
-// 3. process.env (injected via vite.config.ts define: SUPABASE_URL / SUPABASE_ANON_KEY)
+// 2. Injected build defines (__SUPABASE_URL__ / __SUPABASE_ANON_KEY__)
+// 3. Vite environment variables (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY)
+// 4. Server hub endpoint /api/config/supabase auto-fetch
 export function getSupabaseCredentials(): { url: string; anonKey: string } {
   let url = '';
   let anonKey = '';
@@ -25,22 +29,43 @@ export function getSupabaseCredentials(): { url: string; anonKey: string } {
   }
 
   if (!url) {
-    url =
-      (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) ||
-      (typeof process !== 'undefined' && process.env?.SUPABASE_URL) ||
-      (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_URL) ||
-      '';
+    if (typeof __SUPABASE_URL__ !== 'undefined' && __SUPABASE_URL__) {
+      url = __SUPABASE_URL__;
+    } else if (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_URL) {
+      url = (import.meta as any).env.VITE_SUPABASE_URL;
+    }
   }
 
   if (!anonKey) {
-    anonKey =
-      (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) ||
-      (typeof process !== 'undefined' && process.env?.SUPABASE_ANON_KEY) ||
-      (typeof process !== 'undefined' && process.env?.VITE_SUPABASE_ANON_KEY) ||
-      '';
+    if (typeof __SUPABASE_ANON_KEY__ !== 'undefined' && __SUPABASE_ANON_KEY__) {
+      anonKey = __SUPABASE_ANON_KEY__;
+    } else if (typeof import.meta !== 'undefined' && (import.meta as any).env?.VITE_SUPABASE_ANON_KEY) {
+      anonKey = (import.meta as any).env.VITE_SUPABASE_ANON_KEY;
+    }
   }
 
-  return { url: url.trim(), anonKey: anonKey.trim() };
+  return { url: (url || '').trim(), anonKey: (anonKey || '').trim() };
+}
+
+// Auto-discover credentials from server endpoint /api/config/supabase
+if (typeof window !== 'undefined') {
+  fetch('/api/config/supabase')
+    .then((res) => (res.ok ? res.json() : null))
+    .then((data) => {
+      if (data && data.supabaseUrl && data.supabaseAnonKey) {
+        const current = getSupabaseCredentials();
+        if (!current.url || !current.anonKey) {
+          try {
+            localStorage.setItem(STORAGE_SUPABASE_URL_KEY, data.supabaseUrl);
+            localStorage.setItem(STORAGE_SUPABASE_ANON_KEY, data.supabaseAnonKey);
+            cachedClient = null;
+            lastClientKey = '';
+            window.dispatchEvent(new CustomEvent('supabase-config-changed'));
+          } catch {}
+        }
+      }
+    })
+    .catch(() => {});
 }
 
 export function isSupabaseConfigured(): boolean {

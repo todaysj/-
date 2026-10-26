@@ -22,6 +22,8 @@ export default defineConfig(() => {
       'process.env.NODE_ENV': JSON.stringify(process.env.NODE_ENV || 'development'),
       'process.env.SUPABASE_URL': JSON.stringify(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''),
       'process.env.SUPABASE_ANON_KEY': JSON.stringify(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''),
+      __SUPABASE_URL__: JSON.stringify(process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || ''),
+      __SUPABASE_ANON_KEY__: JSON.stringify(process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY || ''),
       'process.env': {},
       global: 'globalThis',
     },

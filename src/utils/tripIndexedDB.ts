@@ -168,50 +168,89 @@ export async function getTripsFromIDB(): Promise<Trip[] | null> {
 }
 
 /**
- * Record a historical backup snapshot for a trip
+ * Record a historical backup snapshot for a trip.
+ * STRICT POLICY: Only creates a snapshot when a new souvenir item is genuinely added!
  */
 export async function saveTripBackup(trip: Trip): Promise<void> {
   try {
     const db = await getTripsDB();
     if (!db) return;
 
-    const now = Date.now();
-    const backup: TripBackup = {
-      id: `${trip.id}_${now}`,
-      tripId: trip.id,
-      timestamp: now,
-      dateStr: new Date(now).toLocaleString('ko-KR', {
-        month: 'numeric',
-        day: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-      }),
-      souvenirCount: countTotalSouvenirs(trip),
-      checklistCount: countTotalChecklist(trip),
-      scheduleCount: trip.schedule?.length || 0,
-      trip: JSON.parse(JSON.stringify(trip))
-    };
+    const currentSouvenirCount = countTotalSouvenirs(trip);
 
     return new Promise((resolve) => {
       const tx = db.transaction([STORE_BACKUPS], 'readwrite');
       const store = tx.objectStore(STORE_BACKUPS);
-      store.put(backup);
-
-      // Keep up to 3 recent backups per trip
       const index = store.index('tripId');
       const req = index.getAll(trip.id);
+
       req.onsuccess = () => {
         const all = (req.result as TripBackup[]) || [];
-        if (all.length > 3) {
-          all.sort((a, b) => a.timestamp - b.timestamp);
-          const toDelete = all.slice(0, all.length - 3);
+        all.sort((a, b) => b.timestamp - a.timestamp);
+
+        // Check latest backup to prevent frequent/duplicate backups
+        const latest = all[0];
+        if (latest && latest.trip) {
+          const latestCount = countTotalSouvenirs(latest.trip);
+          // If total souvenir count has not increased, check if any new souvenir ID was added
+          if (currentSouvenirCount <= latestCount) {
+            const latestIds = new Set<string>();
+            for (const tab of getTripSouvenirTabs(latest.trip)) {
+              for (const itm of tab.items || []) {
+                if (itm?.id) latestIds.add(itm.id);
+              }
+            }
+            let hasNewItem = false;
+            for (const tab of getTripSouvenirTabs(trip)) {
+              for (const itm of tab.items || []) {
+                if (itm?.id && !latestIds.has(itm.id)) {
+                  hasNewItem = true;
+                  break;
+                }
+              }
+              if (hasNewItem) break;
+            }
+
+            if (!hasNewItem) {
+              // No new souvenir item added - strictly skip creating a backup!
+              return resolve();
+            }
+          }
+        }
+
+        const now = Date.now();
+        const backup: TripBackup = {
+          id: `${trip.id}_${now}`,
+          tripId: trip.id,
+          timestamp: now,
+          dateStr: new Date(now).toLocaleString('ko-KR', {
+            month: 'numeric',
+            day: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit'
+          }),
+          souvenirCount: currentSouvenirCount,
+          checklistCount: countTotalChecklist(trip),
+          scheduleCount: trip.schedule?.length || 0,
+          trip: JSON.parse(JSON.stringify(trip))
+        };
+
+        store.put(backup);
+
+        // Keep up to 30 recent souvenir addition backups per trip
+        const updatedAll = [backup, ...all];
+        if (updatedAll.length > 30) {
+          updatedAll.sort((a, b) => a.timestamp - b.timestamp);
+          const toDelete = updatedAll.slice(0, updatedAll.length - 30);
           for (const item of toDelete) {
             store.delete(item.id);
           }
         }
+        resolve();
       };
 
+      req.onerror = () => resolve();
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
     });
@@ -221,7 +260,7 @@ export async function saveTripBackup(trip: Trip): Promise<void> {
 }
 
 /**
- * Get all historical backups for a trip, sorted latest first
+ * Get all historical backups for a trip, sorted latest first (up to 30 snapshots)
  */
 export async function getTripBackups(tripId: string): Promise<TripBackup[]> {
   try {
@@ -236,13 +275,13 @@ export async function getTripBackups(tripId: string): Promise<TripBackup[]> {
       req.onsuccess = () => {
         const list = (req.result as TripBackup[]) || [];
         list.sort((a, b) => b.timestamp - a.timestamp);
-        if (list.length > 3) {
-          const toDelete = list.slice(3);
+        if (list.length > 30) {
+          const toDelete = list.slice(30);
           for (const item of toDelete) {
             store.delete(item.id);
           }
         }
-        resolve(list.slice(0, 3));
+        resolve(list.slice(0, 30));
       };
       req.onerror = () => resolve([]);
     });

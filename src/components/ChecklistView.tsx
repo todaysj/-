@@ -56,6 +56,21 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
   const [newItemTitle, setNewItemTitle] = useState('');
   const [category, setCategory] = useState(allCategories[0] || '필수 서류');
   const [isEssential, setIsEssential] = useState(false);
+  const [isNewItemCustomCategory, setIsNewItemCustomCategory] = useState(false);
+  const [customCategoryInput, setCustomCategoryInput] = useState('');
+
+  // Item Edit Modal State
+  const [editingItem, setEditingItem] = useState<PackingItem | null>(null);
+  const [editItemTitle, setEditItemTitle] = useState('');
+  const [editItemCategory, setEditItemCategory] = useState('');
+  const [editItemIsEssential, setEditItemIsEssential] = useState(false);
+  const [isEditItemNewCategory, setIsEditItemNewCategory] = useState(false);
+  const [editItemNewCategoryInput, setEditItemNewCategoryInput] = useState('');
+
+  // Category Rename Modal State
+  const [categoryToRename, setCategoryToRename] = useState<string | null>(null);
+  const [renameCategoryInput, setRenameCategoryInput] = useState('');
+  const [renameErrorMessage, setRenameErrorMessage] = useState<string | null>(null);
 
   const totalCount = currentTab.items.length;
   const packedCount = currentTab.items.filter((p) => p.isPacked).length;
@@ -88,20 +103,104 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
     e.preventDefault();
     if (!newItemTitle.trim()) return;
 
+    const chosenCat = isNewItemCustomCategory && customCategoryInput.trim()
+      ? customCategoryInput.trim()
+      : category || allCategories[0] || '기타';
+
     const newItem: PackingItem = {
       id: `pack-${Date.now()}`,
       title: newItemTitle.trim(),
-      category: category || allCategories[0] || '기타',
+      category: chosenCat,
       isPacked: false,
       isEssential
     };
 
-    updateCurrentChecklistTab((tab) => ({
-      ...tab,
-      items: [...tab.items, newItem]
-    }));
+    updateCurrentChecklistTab((tab) => {
+      const currentCats = tab.categories || DEFAULT_PACKING_CATEGORIES;
+      const updatedCats = currentCats.includes(chosenCat)
+        ? currentCats
+        : [...currentCats, chosenCat];
+
+      return {
+        ...tab,
+        categories: updatedCats,
+        items: [...tab.items, newItem]
+      };
+    });
 
     setNewItemTitle('');
+    if (isNewItemCustomCategory) {
+      setCategory(chosenCat);
+      setIsNewItemCustomCategory(false);
+      setCustomCategoryInput('');
+    }
+  };
+
+  const handleOpenEditItemModal = (item: PackingItem) => {
+    setEditingItem(item);
+    setEditItemTitle(item.title);
+    setEditItemCategory(item.category);
+    setEditItemIsEssential(item.isEssential || false);
+    setIsEditItemNewCategory(false);
+    setEditItemNewCategoryInput('');
+  };
+
+  const handleSaveEditedItem = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingItem || !editItemTitle.trim()) return;
+
+    const targetCategory = isEditItemNewCategory && editItemNewCategoryInput.trim()
+      ? editItemNewCategoryInput.trim()
+      : editItemCategory.trim() || allCategories[0] || '기타';
+
+    updateCurrentChecklistTab((tab) => {
+      const currentCats = tab.categories || DEFAULT_PACKING_CATEGORIES;
+      const updatedCats = currentCats.includes(targetCategory)
+        ? currentCats
+        : [...currentCats, targetCategory];
+
+      return {
+        ...tab,
+        categories: updatedCats,
+        items: tab.items.map((p) =>
+          p.id === editingItem.id
+            ? {
+                ...p,
+                title: editItemTitle.trim(),
+                category: targetCategory,
+                isEssential: editItemIsEssential
+              }
+            : p
+        )
+      };
+    });
+
+    setEditingItem(null);
+  };
+
+  const handleRenameCategory = (oldName: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed || trimmed === oldName) {
+      setCategoryToRename(null);
+      return;
+    }
+    if (allCategories.includes(trimmed)) {
+      setRenameErrorMessage('이미 존재하는 카테고리 이름입니다.');
+      setTimeout(() => setRenameErrorMessage(null), 2500);
+      return;
+    }
+
+    updateCurrentChecklistTab((tab) => ({
+      ...tab,
+      categories: (tab.categories || DEFAULT_PACKING_CATEGORIES).map((c) => (c === oldName ? trimmed : c)),
+      items: tab.items.map((p) => (p.category === oldName ? { ...p, category: trimmed } : p))
+    }));
+
+    if (selectedTab === oldName) setSelectedTab(trimmed);
+    if (category === oldName) setCategory(trimmed);
+    setCategoryToRename(null);
+    setRenameCategoryInput('');
+    setRenameErrorMessage(null);
   };
 
   const handleDeletePackingItem = (itemId: string) => {
@@ -433,24 +532,56 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
           className="flex-1 w-full px-3.5 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:ring-2 focus:ring-sky-500 outline-none"
         />
 
-        <select
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-          className="w-full sm:w-auto px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none"
-        >
-          {allCategories.map((cat) => (
-            <option key={cat} value={cat}>
-              {cat}
-            </option>
-          ))}
-        </select>
+        {isNewItemCustomCategory ? (
+          <div className="flex items-center space-x-1.5 w-full sm:w-auto">
+            <input
+              type="text"
+              placeholder="새 카테고리명"
+              value={customCategoryInput}
+              onChange={(e) => setCustomCategoryInput(e.target.value)}
+              className="w-full sm:w-36 px-3 py-2 bg-white border border-sky-400 rounded-xl text-xs font-bold text-slate-800 outline-none focus:ring-2 focus:ring-sky-500"
+              autoFocus
+            />
+            <button
+              type="button"
+              onClick={() => {
+                setIsNewItemCustomCategory(false);
+                setCustomCategoryInput('');
+              }}
+              className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition cursor-pointer"
+              title="목록에서 선택하기"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        ) : (
+          <select
+            value={category}
+            onChange={(e) => {
+              if (e.target.value === '__CUSTOM_NEW__') {
+                setIsNewItemCustomCategory(true);
+                setCustomCategoryInput('');
+              } else {
+                setCategory(e.target.value);
+              }
+            }}
+            className="w-full sm:w-auto px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-700 outline-none cursor-pointer"
+          >
+            {allCategories.map((cat) => (
+              <option key={cat} value={cat}>
+                {cat}
+              </option>
+            ))}
+            <option value="__CUSTOM_NEW__">➕ 새 카테고리 직접 입력...</option>
+          </select>
+        )}
 
         <label className="flex items-center space-x-1.5 text-xs text-slate-600 font-bold whitespace-nowrap cursor-pointer">
           <input
             type="checkbox"
             checked={isEssential}
             onChange={(e) => setIsEssential(e.target.checked)}
-            className="rounded text-sky-600 focus:ring-sky-500 w-4 h-4"
+            className="rounded text-sky-600 focus:ring-sky-500 w-4 h-4 cursor-pointer"
           />
           <span>🚨 필수 품목</span>
         </label>
@@ -473,11 +604,24 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                 <span className="flex items-center space-x-1.5">
                   <span>📌 {cat}</span>
                 </span>
-                <div className="flex items-center space-x-2">
-                  <span className="text-xs text-slate-400 font-normal">
+                <div className="flex items-center space-x-1">
+                  <span className="text-xs text-slate-400 font-normal mr-1.5">
                     {catItems.filter((i) => i.isPacked).length}/{catItems.length}
                   </span>
                   <button
+                    type="button"
+                    onClick={() => {
+                      setCategoryToRename(cat);
+                      setRenameCategoryInput(cat);
+                      setRenameErrorMessage(null);
+                    }}
+                    className="p-1 text-slate-300 hover:text-sky-600 transition cursor-pointer"
+                    title="카테고리 이름 변경"
+                  >
+                    <Pencil className="w-3.5 h-3.5" />
+                  </button>
+                  <button
+                    type="button"
                     onClick={() => setCategoryToDelete(cat)}
                     className="p-1 text-slate-300 hover:text-rose-600 transition cursor-pointer"
                     title="카테고리 탭 삭제"
@@ -497,7 +641,7 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                     <div
                       key={item.id}
                       onClick={() => handleTogglePacked(item.id)}
-                      className={`p-2.5 rounded-xl border transition flex items-center justify-between cursor-pointer ${
+                      className={`p-2.5 rounded-xl border transition flex items-center justify-between cursor-pointer group ${
                         item.isPacked
                           ? 'bg-emerald-50/50 border-emerald-200/60 text-slate-400'
                           : 'bg-slate-50 border-slate-200 text-slate-800 hover:border-sky-300'
@@ -505,7 +649,7 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                     >
                       <div className="flex items-center space-x-2.5 min-w-0">
                         <div
-                          className={`w-5 h-5 rounded-md border flex items-center justify-center transition ${
+                          className={`w-5 h-5 rounded-md border flex items-center justify-center transition shrink-0 ${
                             item.isPacked
                               ? 'bg-emerald-500 border-emerald-500 text-white'
                               : 'bg-white border-slate-300'
@@ -523,17 +667,38 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                             필수
                           </span>
                         )}
+
+                        {selectedTab === 'ALL' && (
+                          <span className="px-1.5 py-0.2 bg-slate-200 text-slate-600 text-[10px] font-medium rounded flex-shrink-0">
+                            {item.category}
+                          </span>
+                        )}
                       </div>
 
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleDeletePackingItem(item.id);
-                        }}
-                        className="p-1 text-slate-300 hover:text-rose-600 transition cursor-pointer"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      <div className="flex items-center space-x-1 shrink-0 ml-2">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleOpenEditItemModal(item);
+                          }}
+                          className="p-1 text-slate-300 hover:text-sky-600 transition cursor-pointer"
+                          title="준비물 수정 (카테고리/이름 변경)"
+                        >
+                          <Pencil className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePackingItem(item.id);
+                          }}
+                          className="p-1 text-slate-300 hover:text-rose-600 transition cursor-pointer"
+                          title="삭제"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -560,8 +725,8 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                   <SlidersHorizontal className="w-4 h-4" />
                 </div>
                 <div>
-                  <h3 className="text-sm sm:text-base font-bold text-slate-800">체크리스트 카테고리 탭 순서 관리</h3>
-                  <p className="text-[11px] text-slate-500 mt-0.5">화살표(▲/▼)를 눌러 카테고리 순서를 위아래로 변경할 수 있습니다.</p>
+                  <h3 className="text-sm sm:text-base font-bold text-slate-800">체크리스트 카테고리 탭 관리</h3>
+                  <p className="text-[11px] text-slate-500 mt-0.5">이름 수정, 순서 변경, 삭제 및 새 카테고리 추가</p>
                 </div>
               </div>
               <button
@@ -620,7 +785,7 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
               <div className="space-y-2 pt-2 border-t border-slate-100">
                 <div className="flex items-center justify-between text-xs font-bold text-slate-700">
                   <span>등록된 카테고리 탭 ({allCategories.length}개)</span>
-                  <span className="text-[11px] text-slate-400 font-medium">위치 변경</span>
+                  <span className="text-[11px] text-slate-400 font-medium">수정 및 이동</span>
                 </div>
 
                 <div className="space-y-1.5">
@@ -642,8 +807,21 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                           <span className="text-[11px] text-slate-500 shrink-0 font-medium">({count}개)</span>
                         </div>
 
-                        {/* Actions: Move Up, Move Down, Delete */}
+                        {/* Actions: Edit Name, Move Up, Move Down, Delete */}
                         <div className="flex items-center space-x-1 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCategoryToRename(cat);
+                              setRenameCategoryInput(cat);
+                              setRenameErrorMessage(null);
+                            }}
+                            className="p-1.5 rounded-lg border text-slate-700 border-slate-200 bg-white hover:bg-sky-50 hover:text-sky-600 hover:border-sky-300 transition cursor-pointer shadow-2xs"
+                            title="카테고리 이름 변경"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                          </button>
+
                           <button
                             type="button"
                             onClick={() => handleMoveCategoryUp(idx)}
@@ -700,6 +878,190 @@ export const ChecklistView: React.FC<ChecklistViewProps> = ({
                 완료
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ✏️ EDIT ITEM MODAL */}
+      {editingItem && (
+        <div
+          onClick={() => setEditingItem(null)}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 border border-slate-100 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center space-x-2.5 text-sky-700">
+                <div className="p-2 bg-sky-50 rounded-xl">
+                  <Pencil className="w-4 h-4" />
+                </div>
+                <h3 className="font-extrabold text-slate-800 text-base">준비물 수정</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingItem(null)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg transition cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedItem} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">준비물 이름</label>
+                <input
+                  type="text"
+                  value={editItemTitle}
+                  onChange={(e) => setEditItemTitle(e.target.value)}
+                  placeholder="준비물 이름 입력"
+                  required
+                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white font-medium"
+                />
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-bold text-slate-700">카테고리</label>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEditItemNewCategory(!isEditItemNewCategory);
+                      setEditItemNewCategoryInput('');
+                    }}
+                    className="text-[11px] font-bold text-sky-600 hover:text-sky-700 cursor-pointer"
+                  >
+                    {isEditItemNewCategory ? '기존 목록에서 선택' : '+ 새 카테고리 입력'}
+                  </button>
+                </div>
+
+                {isEditItemNewCategory ? (
+                  <input
+                    type="text"
+                    value={editItemNewCategoryInput}
+                    onChange={(e) => setEditItemNewCategoryInput(e.target.value)}
+                    placeholder="새 카테고리 이름 입력"
+                    required
+                    autoFocus
+                    className="w-full px-3.5 py-2 text-xs bg-white border border-sky-400 rounded-xl outline-none focus:ring-2 focus:ring-sky-500 font-bold text-slate-800"
+                  />
+                ) : (
+                  <select
+                    value={editItemCategory}
+                    onChange={(e) => setEditItemCategory(e.target.value)}
+                    className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-sky-500 font-bold text-slate-700 cursor-pointer"
+                  >
+                    {allCategories.map((cat) => (
+                      <option key={cat} value={cat}>
+                        {cat}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+
+              <div className="pt-1">
+                <label className="flex items-center space-x-2 text-xs text-slate-700 font-bold cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editItemIsEssential}
+                    onChange={(e) => setEditItemIsEssential(e.target.checked)}
+                    className="rounded text-sky-600 focus:ring-sky-500 w-4 h-4 cursor-pointer"
+                  />
+                  <span>🚨 필수 품목으로 지정</span>
+                </label>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setEditingItem(null)}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition cursor-pointer"
+                >
+                  취소
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  저장하기
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 🏷️ RENAME CATEGORY MODAL */}
+      {categoryToRename && (
+        <div
+          onClick={() => {
+            setCategoryToRename(null);
+            setRenameErrorMessage(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-fade-in"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white rounded-2xl p-6 max-w-sm w-full shadow-2xl space-y-4 border border-slate-100 animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center space-x-2.5 text-sky-700">
+              <div className="p-2 bg-sky-50 rounded-xl">
+                <Pencil className="w-4 h-4" />
+              </div>
+              <h3 className="font-extrabold text-slate-800 text-base">카테고리 이름 변경</h3>
+            </div>
+
+            <p className="text-xs text-slate-500 leading-relaxed">
+              '<span className="font-bold text-slate-800">{categoryToRename}</span>' 카테고리의 이름을 변경하면 이 카테고리에 속한 모든 준비물도 자동으로 업데이트됩니다.
+            </p>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleRenameCategory(categoryToRename, renameCategoryInput);
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">새 카테고리 이름</label>
+                <input
+                  type="text"
+                  value={renameCategoryInput}
+                  onChange={(e) => {
+                    setRenameCategoryInput(e.target.value);
+                    if (renameErrorMessage) setRenameErrorMessage(null);
+                  }}
+                  placeholder="카테고리 이름 입력"
+                  required
+                  autoFocus
+                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-sky-500 focus:bg-white font-bold text-slate-800"
+                />
+                {renameErrorMessage && (
+                  <p className="text-[11px] font-bold text-rose-500 mt-1">{renameErrorMessage}</p>
+                )}
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCategoryToRename(null);
+                    setRenameErrorMessage(null);
+                  }}
+                  className="px-4 py-2 text-xs font-bold text-slate-600 bg-slate-100 hover:bg-slate-200 rounded-xl transition cursor-pointer"
+                >
+                  취소
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-bold text-white bg-sky-600 hover:bg-sky-500 rounded-xl transition shadow-sm cursor-pointer"
+                >
+                  변경 완료
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
